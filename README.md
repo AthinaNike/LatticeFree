@@ -1,9 +1,5 @@
 # LatticeFree
 
-** Note by Veronica Massara **
-This workbench has been created as a follow up of my Master Degree Thesis. The code was made with Claude Opus and Fable5. I'm not a professional programmer, this workbench was created as an engineering need to create parts and components with a parametric TPMS infill
-
-
 **A free TPMS lattice-infill generator for FreeCAD.** Fill any solid with a
 **Gyroid**, **Schwarz P**, or **Diamond** lattice using implicit modelling:
 outer shell, smooth fillet at the shell/lattice junction, relative-density
@@ -260,6 +256,11 @@ This workbench installs the classic way: `Mod/LatticeFree/InitGui.py`.
 On FreeCAD 1.1 an active `package.xml` makes the loader treat the addon as a
 "package-format" module and look for a namespaced `freecad/<name>/init_gui.py`
 layout — which this addon does not use — so the classic `InitGui.py` scan gets
+
+
+** Note by Veronica Massara **
+This workbench has been created as a follow up of my Master Degree Thesis. The code was made with Claude Opus and Fable5. I'm not a professional programmer, this workbench was created as an engineering need to create parts and components with a parametric TPMS infill
+
 bypassed and the workbench silently fails to appear at startup. For that reason
 the metadata file ships here as `package.xml.bak` (inactive). Do not rename it
 back to `package.xml` unless you also convert the addon to the namespaced layout.
