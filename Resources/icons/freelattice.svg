@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3a7bd5"/>
+      <stop offset="1" stop-color="#00d2ff"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="3" width="58" height="58" rx="10" fill="#1c2733"/>
+  <!-- trama giroide stilizzata: onde sinusoidali intrecciate -->
+  <g fill="none" stroke="url(#g)" stroke-width="3.2" stroke-linecap="round">
+    <path d="M8 20 Q20 8 32 20 T56 20"/>
+    <path d="M8 32 Q20 20 32 32 T56 32"/>
+    <path d="M8 44 Q20 32 32 44 T56 44"/>
+  </g>
+  <g fill="none" stroke="#00d2ff" stroke-width="2" stroke-linecap="round" opacity="0.55">
+    <path d="M20 8 Q8 20 20 32 T20 56"/>
+    <path d="M32 8 Q20 20 32 32 T32 56"/>
+    <path d="M44 8 Q32 20 44 32 T44 56"/>
+  </g>
+</svg>

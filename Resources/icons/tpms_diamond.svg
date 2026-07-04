@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#c94b8c"/>
+      <stop offset="1" stop-color="#ffb199"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="3" width="58" height="58" rx="10" fill="#1c2733"/>
+  <!-- trama Diamond: rombi intrecciati -->
+  <g fill="none" stroke="url(#g)" stroke-width="3" stroke-linejoin="round">
+    <path d="M32 8 L50 26 L32 44 L14 26 Z"/>
+    <path d="M32 24 L44 36 L32 48 L20 36 Z"/>
+  </g>
+  <g fill="none" stroke="#ffb199" stroke-width="2" opacity="0.45">
+    <path d="M14 26 L32 24 L50 26 M20 36 L32 44 L44 36"/>
+  </g>
+  <text x="49" y="58" font-family="DejaVu Sans, Arial, sans-serif" font-size="17"
+        font-weight="bold" fill="#ffffff" text-anchor="middle">D</text>
+</svg>
