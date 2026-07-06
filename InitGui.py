@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
-"""LatticeFree workbench — registrazione in FreeCAD.
+"""LatticeFree workbench — FreeCAD registration.
 
-Usa i nomi 'Workbench' e 'Gui' che FreeCAD inietta nel namespace di
-InitGui.py durante lo scan di avvio (stesso pattern dei workbench che
-caricano correttamente su questa installazione). Tutto cio' che puo'
-fallire (icona, import dei comandi) e' isolato in try/except, cosi' un
-errore non puo' impedire la registrazione del workbench.
+Uses the 'Workbench' and 'Gui' names that FreeCAD injects into the
+InitGui.py namespace during the startup scan (same pattern as the
+workbenches that load correctly on this installation). Everything that
+can fail (icon, command imports) is isolated in try/except, so an
+error can never prevent the workbench registration.
 
-Nome esterno: LatticeFree (cartella Mod/LatticeFree, classe
-LatticeFreeWorkbench, etichette LatticeFree). Il pacchetto Python interno
-resta 'freelattice' e il comando 'FreeLattice_Genera': sono nomi interni
-invisibili all'utente.
+External name: LatticeFree (Mod/LatticeFree folder, class
+LatticeFreeWorkbench, LatticeFree labels). The internal Python package
+stays 'freelattice' and the legacy command 'FreeLattice_Genera': these
+are internal names invisible to the user.
 """
 
 import os
@@ -18,14 +18,14 @@ import FreeCAD as App
 
 
 class LatticeFreeWorkbench(Workbench):  # noqa: F821  (Workbench iniettato da FreeCAD)
-    """Workbench per la generazione di infill lattice TPMS (giroide)."""
+    """Workbench for TPMS lattice infill generation."""
 
     MenuText = "LatticeFree"
     ToolTip = "TPMS lattice infill generator (Gyroid, Schwarz P, Diamond)"
 
     def __init__(self):
-        # Percorso icona difensivo: un errore qui non deve mai impedire
-        # la registrazione del workbench all'avvio.
+        # Defensive icon path: an error here must never prevent the
+        # workbench registration at startup.
         try:
             icon = os.path.join(App.getUserAppDataDir(), "Mod",
                                 "LatticeFree", "Resources", "icons",
@@ -36,10 +36,10 @@ class LatticeFreeWorkbench(Workbench):  # noqa: F821  (Workbench iniettato da Fr
             pass
 
     def Initialize(self):
-        # Chiamato la prima volta che si attiva il workbench.
+        # Called the first time the workbench is activated.
         try:
             from freelattice import commands  # noqa: F401  (registra i comandi)
-            cmds = list(commands.COMANDI_TPMS)
+            cmds = list(commands.TPMS_COMMANDS)
             self.appendToolbar("LatticeFree", cmds)
             self.appendMenu("LatticeFree", cmds)
             App.Console.PrintMessage("LatticeFree workbench caricato.\n")
