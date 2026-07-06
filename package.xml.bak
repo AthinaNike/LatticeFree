@@ -6,9 +6,9 @@
     FEM mid-surface export. Implicit modelling, no CAD booleans.</description>
   <version>1.1.0</version>
   <date>2026-07-06</date>
-  <maintainer email="you@example.com">Veronica Massara</maintainer>
+  <maintainer email="vera.massara@gmail.com">Veronica Massara</maintainer>
   <license file="LICENSE">LGPL-2.1-or-later</license>
-  <url type="repository" branch="main">https://github.com/USER/LatticeFree</url>
+  <url type="repository" branch="main">https://github.com/AthinaNike/LatticeFree</url>
   <icon>Resources/icons/freelattice.svg</icon>
   <content>
     <workbench>
