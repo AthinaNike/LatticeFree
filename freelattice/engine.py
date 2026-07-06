@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-FreeLattice — motore di calcolo (engine)
-=========================================
-Pipeline implicita per infill TPMS (giroide, Schwarz P, Diamond):
-campi SDF, campo TPMS a due falde, shell, raccordo, grading di
-densita', marching tetrahedra, pulizia mesh. Separato
-dall'interfaccia (RNF6): nessuna dipendenza da Qt.
-Richiede solo numpy; usa scipy se disponibile.
+FreeLattice — computation engine
+=================================
+Implicit pipeline for TPMS infill (Gyroid, Schwarz P, Diamond):
+SDF fields, two-sheet TPMS field, shell, fillet, density grading,
+marching tetrahedra, mesh cleanup. Kept separate from the GUI
+(NFR6): no Qt dependency.
+Requires only numpy; uses scipy when available.
 """
 
 import os
@@ -67,8 +67,8 @@ def marching_tetrahedra(x, y, z, vol):
 
     vals8 = np.empty((ii.size, 8), dtype=np.float32)
     pts8 = np.empty((ii.size, 8, 3), dtype=np.float32)
-    # indice GLOBALE del nodo di griglia per ogni corner del cubo: serve
-    # a interpolare ogni spigolo sempre nello stesso verso (vedi sotto).
+    # GLOBAL grid-node index for each cube corner: needed to always
+    # interpolate every edge in the same direction (see below).
     gid8 = np.empty((ii.size, 8), dtype=np.int64)
     for c, (dx, dy, dz) in enumerate(_CUBE_CORNERS):
         vals8[:, c] = vol[ii + dx, jj + dy, kk + dz]
@@ -91,21 +91,21 @@ def marching_tetrahedra(x, y, z, vol):
             if m.size == 0:
                 continue
             v, p, g = vals[m], pts[m], gids[m]
-            # Direzione "verso il fuori" per questa configurazione: dal
-            # baricentro dei corner DENTRO (campo > 0) a quelli FUORI. La
-            # normale di ogni triangolo deve concordare con questa direzione,
-            # altrimenti scambio due vertici. Cosi' l'orientamento e' coerente
-            # e corretto a prescindere dalla tabella _CASES.
+            # "Outward" direction for this configuration: from the
+            # barycenter of the INSIDE corners (field > 0) to the OUTSIDE
+            # ones. Each triangle normal must agree with this direction,
+            # otherwise two vertices are swapped. This keeps the orientation
+            # consistent and correct regardless of the _CASES table.
             in_idx = [q for q in range(4) if (c >> q) & 1]
             out_idx = [q for q in range(4) if not (c >> q) & 1]
             outward = p[:, out_idx, :].mean(axis=1) - p[:, in_idx, :].mean(axis=1)
             for tri in triangles:
                 corners = []
                 for (a, b) in tri:
-                    # Interpola SEMPRE dal nodo di griglia con id globale
-                    # minore verso il maggiore: lo stesso spigolo, condiviso
-                    # da tetraedri adiacenti, produce un punto bit-identico in
-                    # entrambi -> la saldatura lo fonde sempre (niente cricche).
+                    # ALWAYS interpolate from the grid node with the lower
+                    # global id to the higher one: the same edge, shared by
+                    # adjacent tetrahedra, yields a bit-identical point in
+                    # both -> welding always merges it (no cracks).
                     swap = g[:, a] > g[:, b]
                     pa = np.where(swap[:, None], p[:, b], p[:, a])
                     pb = np.where(swap[:, None], p[:, a], p[:, b])
@@ -119,7 +119,7 @@ def marching_tetrahedra(x, y, z, vol):
                 tri_pts[flip] = tri_pts[flip][:, [0, 2, 1], :]
                 tris.append(tri_pts)
     if not tris:
-        raise RuntimeError("Nessuna superficie trovata: controlla i parametri.")
+        raise RuntimeError("Nessuna superficie trovata: controlla i parameters.")
     return np.concatenate(tris, axis=0)
 
 
@@ -128,7 +128,7 @@ def marching_tetrahedra(x, y, z, vol):
 # ======================================================================
 
 # ----------------------------------------------------------------------
-# Funzioni nodali dei TPMS supportati. Argomenti gia' scalati (u = k*x).
+# Nodal functions of the supported TPMS. Arguments already scaled (u = k*x).
 # ----------------------------------------------------------------------
 
 def _g_gyroid(U, V, W):
@@ -149,14 +149,14 @@ def _g_diamond(U, V, W):
 
 
 # ----------------------------------------------------------------------
-# Registro TPMS.
-# Per ogni tipo: funzione nodale g, tabelle di calibrazione densita' <->
-# isovalore (frazione di volume {|g| < t}, MISURATA numericamente su
-# griglia 220^3 cell-centered, adimensionale: vale per qualunque cella)
-# e C_FORMA = media superficiale di |grad g| su g=0 (stesso metodo per
-# tutti i tipi; sul giroide riproduce la tabella V0 entro lo 0.2%).
-# Aggiungere un TPMS = aggiungere una voce qui (+ un comando in
-# commands.py): tutto il resto della pipeline e' generico.
+# TPMS registry.
+# For each tpms_type: nodal function g, density <-> isovalue calibration
+# tables (volume fraction of {|g| < t}, numerically MEASURED on a 220^3
+# cell-centered grid, dimensionless: valid for any cell size) and
+# C_FORMA = surface average of |grad g| on g=0 (same method for all
+# types; on the gyroid it reproduces the V0 table within 0.2%).
+# Adding a TPMS = adding one entry here (+ one command in
+# commands.py): the rest of the pipeline is fully generic.
 # ----------------------------------------------------------------------
 TPMS = {
     "gyroid": dict(
@@ -206,85 +206,84 @@ TPMS = {
 
 TPMS_DEFAULT = "gyroid"
 
-# range consigliato di densita' relativa (parete stampabile, pori aperti)
+# recommended relative-density range (printable wall, open pores)
 RHO_MIN = 0.10
 RHO_MAX = 0.70
 
 
-def campo_tpms(X, Y, Z, period, thickness, tipo=TPMS_DEFAULT):
-    """Campo implicito del TPMS a DUE FALDE (positivo dentro la parete).
+def tpms_field(X, Y, Z, period, thickness, tpms_type=TPMS_DEFAULT):
+    """TWO-SHEET implicit TPMS field (positive inside the wall).
 
-    La lamina {|g| < t} e' codificata come PRODOTTO delle due falde:
+    The slab {|g| < t} is encoded as the PRODUCT of the two sheets:
 
         f = (t - g)(t + g) / (2 t k) = (t^2 - g^2) / (2 t k)
 
-    Stesso identico solido di (t - |g|)/k, ma f e' LISCIO ovunque
-    (polinomiale in g): niente kink del valore assoluto sulla
-    superficie media g=0. Le due superfici g=+t e g=-t vengono cosi'
-    estratte dalla marching come falde separate e regolari — spariscono
-    i pizzicamenti/non-manifold che il kink produceva sulle pareti
-    sottili a bassa densita'. Vicino alla superficie f ha lo stesso
-    gradiente (|grad g|/k) della vecchia lamina, quindi calibrazioni,
-    spessori di parete e raccordo smooth-max restano invariati.
-    `thickness` puo' essere scalare o campo (grading).
+    Exactly the same solid as (t - |g|)/k, but f is SMOOTH everywhere
+    (polynomial in g): no absolute-value kink on the mid-surface g=0.
+    The two surfaces g=+t and g=-t are thus extracted by the marching
+    as separate, regular sheets — the pinching/non-manifold artifacts
+    the kink produced on thin low-density walls are gone. Near the
+    surface f has the same gradient (|grad g|/k) as the old slab
+    field, so calibrations, wall thicknesses and the smooth-max fillet
+    are unchanged. `thickness` may be a scalar or a field (grading).
     """
     k = 2.0 * np.pi / period
-    g = TPMS[tipo]["g"](k * X, k * Y, k * Z)
+    g = TPMS[tpms_type]["g"](k * X, k * Y, k * Z)
     t = np.maximum(thickness, 1.0e-6)
     return (t * t - g * g) / (2.0 * t * k)
 
 
 def gyroid_mm(X, Y, Z, period, thickness):
-    """Compatibilita' V0: campo del giroide (ora a due falde)."""
-    return campo_tpms(X, Y, Z, period, thickness, "gyroid")
+    """V0 compatibility: gyroid field (now two-sheet)."""
+    return tpms_field(X, Y, Z, period, thickness, "gyroid")
 
 
-def densita_to_isovalore(rho, tipo=TPMS_DEFAULT):
-    """Densita' relativa (0-1) -> isovalore di spessore del TPMS."""
-    d = TPMS[tipo]
+def density_to_isovalue(rho, tpms_type=TPMS_DEFAULT):
+    """Relative density (0-1) -> TPMS thickness isovalue."""
+    d = TPMS[tpms_type]
     return float(np.interp(rho, d["cal_rho"], d["cal_t"]))
 
 
-def isovalore_to_densita(t, tipo=TPMS_DEFAULT):
-    """Isovalore -> densita' relativa stimata (0-1)."""
-    d = TPMS[tipo]
+def isovalue_to_density(t, tpms_type=TPMS_DEFAULT):
+    """Isovalue -> estimated relative density (0-1)."""
+    d = TPMS[tpms_type]
     return float(np.interp(t, d["cal_t"], d["cal_rho"]))
 
 
-# Relazione isovalore <-> spessore FISICO di parete (mm).
-# La parete e' la fascia |g| < t; spessore w = 2t/|grad g|, e
-# |grad g| = (2pi/L) * C_FORMA(tipo), media misurata su g=0.
-C_FORMA = TPMS["gyroid"]["c_forma"]   # compatibilita' V0
+# Isovalue <-> PHYSICAL wall thickness (mm) relation.
+# The wall is the band |g| < t; thickness w = 2t/|grad g|, and
+# |grad g| = (2pi/L) * C_FORMA(tpms_type), average measured on g=0.
+C_FORMA = TPMS["gyroid"]["c_forma"]   # V0 compatibility
 
 
-def spessore_parete_mm(t, cell_size, tipo=TPMS_DEFAULT):
-    """Isovalore -> spessore fisico di parete in mm, per data cella."""
-    cf = TPMS[tipo]["c_forma"]
+def wall_thickness_mm(t, cell_size, tpms_type=TPMS_DEFAULT):
+    """Isovalue -> physical wall thickness in mm, for a given cell."""
+    cf = TPMS[tpms_type]["c_forma"]
     return 2.0 * t * cell_size / (2.0 * np.pi * cf)
 
 
-def isovalore_da_spessore(w_mm, cell_size, tipo=TPMS_DEFAULT):
-    """Spessore fisico (mm) -> isovalore, per data cella."""
-    cf = TPMS[tipo]["c_forma"]
+def isovalue_from_thickness(w_mm, cell_size, tpms_type=TPMS_DEFAULT):
+    """Physical thickness (mm) -> isovalue, for a given cell."""
+    cf = TPMS[tpms_type]["c_forma"]
     return w_mm * 2.0 * np.pi * cf / (2.0 * cell_size)
 
 
-def densita_min_stampabile(cell_size, nozzle_mm, tipo=TPMS_DEFAULT):
-    """Densita' relativa minima per avere parete >= nozzle, data cella."""
-    t_min = isovalore_da_spessore(nozzle_mm, cell_size, tipo)
-    return isovalore_to_densita(t_min, tipo)
+def min_printable_density(cell_size, nozzle_mm, tpms_type=TPMS_DEFAULT):
+    """Minimum relative density for wall >= nozzle, given the cell."""
+    t_min = isovalue_from_thickness(nozzle_mm, cell_size, tpms_type)
+    return isovalue_to_density(t_min, tpms_type)
 
 
-def spacing_consigliato(cell_size, rho_min_usata, tipo=TPMS_DEFAULT,
-                        min_el_per_parete=3.0):
-    """Elemento di griglia consigliato: il piu' fine tra cella/15 e
-    parete_minima/3. E' la cura dei 'buchi esagonali' alle basse
-    densita': con l'auto cella/15 una parete al 10% e' ~mezzo elemento
-    (sotto-campionata per costruzione); qui la risoluzione insegue la
-    parete piu' sottile davvero presente (grading incluso)."""
-    t_min = densita_to_isovalore(rho_min_usata, tipo)
-    w_min = spessore_parete_mm(t_min, cell_size, tipo)
-    return max(0.05, min(cell_size / 15.0, w_min / min_el_per_parete))
+def recommended_spacing(cell_size, rho_min_used, tpms_type=TPMS_DEFAULT,
+                        min_el_per_wall=3.0):
+    """Recommended grid element: the finer of cell/15 and
+    min_wall/3. This is the cure for the 'hexagonal holes' at low
+    densities: with the cell/15 auto a 10% wall is ~half an element
+    (under-sampled by construction); here the resolution tracks the
+    thinnest wall actually present (grading included)."""
+    t_min = density_to_isovalue(rho_min_used, tpms_type)
+    w_min = wall_thickness_mm(t_min, cell_size, tpms_type)
+    return max(0.05, min(cell_size / 15.0, w_min / min_el_per_wall))
 
 
 def smoothstep(x):
@@ -292,8 +291,8 @@ def smoothstep(x):
     return x * x * (3.0 - 2.0 * x)
 
 
-def occupancy_da_tris(P, F, x, y, z, spacing, log=None):
-    """Occupanza per parita' di attraversamenti in Z."""
+def occupancy_from_tris(P, F, x, y, z, spacing, log=None):
+    """Occupancy by crossing parity along Z."""
     nx, ny, nz = len(x), len(y), len(z)
     C = np.zeros((nx, ny, nz + 1), dtype=np.int16)
     gx = x.astype(np.float64) + spacing * 1.3e-4
@@ -329,8 +328,8 @@ def occupancy_da_tris(P, F, x, y, z, spacing, log=None):
     return occ
 
 
-def sdf_grezzo(occ, spacing, cap_mm):
-    """Distanza con segno (mm), grezza (precisione ~mezzo voxel)."""
+def sdf_coarse(occ, spacing, cap_mm):
+    """Signed distance (mm), coarse (~half-voxel accuracy)."""
     if HAVE_SCIPY:
         d_in = _ndi.distance_transform_edt(occ, sampling=spacing)
         d_out = _ndi.distance_transform_edt(~occ, sampling=spacing)
@@ -340,7 +339,7 @@ def sdf_grezzo(occ, spacing, cap_mm):
     d = np.zeros(occ.shape, dtype=np.float32)
     remaining = occ.copy()
 
-    def dilata(m):
+    def dilate(m):
         r = m.copy()
         r[1:, :, :] |= m[:-1, :, :]; r[:-1, :, :] |= m[1:, :, :]
         r[:, 1:, :] |= m[:, :-1, :]; r[:, :-1, :] |= m[:, 1:, :]
@@ -348,7 +347,7 @@ def sdf_grezzo(occ, spacing, cap_mm):
         return r
 
     for k in range(1, K + 1):
-        reached = dilata(reached)
+        reached = dilate(reached)
         new = reached & remaining
         d[new] = k * spacing
         remaining &= ~new
@@ -359,8 +358,8 @@ def sdf_grezzo(occ, spacing, cap_mm):
                     -0.5 * spacing).astype(np.float32)
 
 
-def _dist_punto_triangolo(Q, a, b, c):
-    """Distanza esatta punti->triangolo (Ericson), vettorizzata sui punti."""
+def _point_triangle_dist(Q, a, b, c):
+    """Exact point->triangle distance (Ericson), vectorized over points."""
     ab = b - a; ac = c - a; bc = c - b
     ap = Q - a; bp = Q - b; cp = Q - c
     d1 = ap @ ab; d2 = ap @ ac
@@ -403,9 +402,9 @@ def _dist_punto_triangolo(Q, a, b, c):
     return np.sqrt(np.einsum("ij,ij->i", diff, diff))
 
 
-def raffina_banda(P, F, x, y, z, sdf, band, log=None):
-    """Sostituisce |sdf| con la distanza esatta nei voxel con
-    |sdf| <= band. Il segno resta quello dell'occupanza."""
+def refine_band(P, F, x, y, z, sdf, band, log=None):
+    """Replaces |sdf| with the exact distance in voxels where
+    |sdf| <= band. The sign stays the occupancy one."""
     in_band = np.abs(sdf) <= band
     n_band = int(in_band.sum())
     if log:
@@ -434,7 +433,7 @@ def raffina_banda(P, F, x, y, z, sdf, band, log=None):
         li, lj, lk = np.nonzero(sub_mask)
         Q = np.stack([x[i0 + li], y[j0 + lj], z[k0 + lk]],
                      axis=1).astype(np.float64)
-        d = _dist_punto_triangolo(Q, a, b, c3)
+        d = _point_triangle_dist(Q, a, b, c3)
         sub_d = d_exact[i0:i1, j0:j1, k0:k1]
         cur = sub_d[li, lj, lk]
         upd = d < cur
@@ -443,7 +442,7 @@ def raffina_banda(P, F, x, y, z, sdf, band, log=None):
 
     valid = in_band & np.isfinite(d_exact)
     sdf[valid] = np.sign(sdf[valid]) * d_exact[valid].astype(np.float32)
-    # i voxel di banda mai toccati (non dovrebbero esistere) restano grezzi
+    # band voxels never touched (should not exist) stay coarse
     return sdf
 
 
@@ -454,19 +453,19 @@ def sdf_box_demo(X, Y, Z, lato):
 
 
 def smooth_max(a, b, k):
-    """Unione morbida (R-function): raccordo di raggio ~k tra i campi."""
+    """Soft union (R-function): ~k-radius fillet between the fields."""
     if k <= 0.0:
         return np.maximum(a, b)
     h = np.maximum(k - np.abs(a - b), 0.0) / k
     return np.maximum(a, b) + 0.25 * k * h * h
 
 
-def campo_finale(sdf, gy, t_shell, r_blend=0.0):
+def final_field(sdf, gy, t_shell, r_blend=0.0):
     if t_shell > 0.0:
         skin = np.minimum(sdf, t_shell - sdf)
         core = sdf - t_shell
         infill = np.minimum(core, gy)
-        # unione morbida: la giunzione shell-giroide nasce raccordata
+        # soft union: the shell-lattice junction is born filleted
         return smooth_max(skin, infill, r_blend)
     return np.minimum(sdf, gy)
 
@@ -475,8 +474,8 @@ def campo_finale(sdf, gy, t_shell, r_blend=0.0):
 # POST-PROCESSING MESH
 # ======================================================================
 
-def salda_vertici(tris, eps):
-    """Triangle soup -> (V, T) con vertici unificati."""
+def weld_vertices(tris, eps):
+    """Triangle soup -> (V, T) with unified vertices."""
     Pf = tris.reshape(-1, 3).astype(np.float64)
     Pq = np.round(Pf / eps).astype(np.int64)
     uniq, inv = np.unique(Pq, axis=0, return_inverse=True)
@@ -493,7 +492,7 @@ def salda_vertici(tris, eps):
 
 
 def taubin(V, T, iterazioni=8, lam=0.5, mu=-0.53):
-    """Smoothing Taubin (leviga senza ritirare il volume)."""
+    """Taubin smoothing (smooths without shrinking the volume)."""
     if iterazioni <= 0:
         return V
     E = np.concatenate([T[:, [0, 1]], T[:, [1, 2]], T[:, [2, 0]]])
@@ -515,16 +514,16 @@ def taubin(V, T, iterazioni=8, lam=0.5, mu=-0.53):
 
 
 # ======================================================================
-# EXPORT FEM — superficie media (parete singola) + remeshing Gmsh
+# FEM EXPORT — mid-surface (single wall) + Gmsh remeshing
 # ======================================================================
 
-def superficie_media(bb_min, bb_max, cell_size, spacing_gen,
+def mid_surface(bb_min, bb_max, cell_size, spacing_gen,
                      target_tris=None, target_P=None, log=None,
-                     tipo=TPMS_DEFAULT):
-    """Estrae la superficie media del TPMS: isosuperficie g=0,
-    SENZA spessore (parete singola), ritagliata sul componente.
-    Restituisce (V, T) saldati. Lo spessore NON e' nella geometria:
-    sara' una proprieta' degli elementi shell nel solutore."""
+                     tpms_type=TPMS_DEFAULT):
+    """Extracts the TPMS mid-surface: the g=0 isosurface,
+    with NO thickness (single wall), clipped to the component.
+    Returns welded (V, T). The thickness is NOT in the geometry:
+    it will be a shell-element property in the solver."""
     pad = 2 * spacing_gen
     x = _axis_samples(bb_min[0] - pad, bb_max[0] + pad, spacing_gen)
     y = _axis_samples(bb_min[1] - pad, bb_max[1] + pad, spacing_gen)
@@ -532,29 +531,29 @@ def superficie_media(bb_min, bb_max, cell_size, spacing_gen,
     X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
 
     k = 2.0 * np.pi / cell_size
-    g = TPMS[tipo]["g"](k * X, k * Y, k * Z).astype(np.float32)
+    g = TPMS[tpms_type]["g"](k * X, k * Y, k * Z).astype(np.float32)
     del X, Y, Z
 
-    # ritaglio sul componente: tengo f=0 solo dentro l'sdf>0
+    # clip to the component: keep f=0 only inside sdf>0
     if target_tris is not None:
-        occ = occupancy_da_tris(target_P, target_tris, x, y, z,
+        occ = occupancy_from_tris(target_P, target_tris, x, y, z,
                                 spacing_gen, log)
-        sdf = sdf_grezzo(occ, spacing_gen, 4 * spacing_gen)
+        sdf = sdf_coarse(occ, spacing_gen, 4 * spacing_gen)
         del occ
-        # campo combinato: superficie media (g=0) intersecata col solido.
-        # uso |g| come "parete sottilissima" tagliata dall'sdf:
-        # estraggo l'isosuperficie di g, poi scarto i triangoli fuori.
+        # combined field: mid-surface (g=0) intersected with the solid.
+        # |g| is used as an "ultra-thin wall" cut by the sdf:
+        # extract the isosurface of g, then drop outside triangles.
         field = g.copy()
         field[sdf < 0] = np.nan   # marcatore: fuori dal pezzo
     else:
         field = g
 
-    # marching tetrahedra sull'isosuperficie g=0 (gestendo i NaN come fuori)
+    # marching tetrahedra on the g=0 isosurface (NaN handled as outside)
     safe = np.where(np.isfinite(field), field, np.float32(1.0e3))
     safe += np.float32(1.0e-4) * spacing_gen
     tris = marching_tetrahedra(x, y, z, safe)
 
-    # scarto i triangoli il cui baricentro cade fuori dal pezzo
+    # drop triangles whose barycenter falls outside the part
     if target_tris is not None:
         cen = tris.mean(axis=1)
         ix = np.clip(np.searchsorted(x, cen[:, 0]) - 1, 0, len(x) - 2)
@@ -563,30 +562,30 @@ def superficie_media(bb_min, bb_max, cell_size, spacing_gen,
         dentro = sdf[ix, iy, iz] > 0
         tris = tris[dentro]
 
-    V, T = salda_vertici(tris, spacing_gen * 1e-3)
+    V, T = weld_vertices(tris, spacing_gen * 1e-3)
     return V, T
 
 
-# NOTA DI SCOPE: il remeshing automatico FEM-grade dei TPMS (triangoli
-# quasi-equilateri garantiti) e' un problema di ricerca: richiede fitting
-# di superfici o reparametrizzazione robusta (Gmsh stalla sui TPMS,
-# HyperMesh-like fitter sono software specializzati). Fuori dall'MVP.
-# Qui esportiamo la superficie media PULITA; la qualita' di calcolo,
-# se serve, si ottiene col remesh interattivo del solutore (PrePoMax,
+# SCOPE NOTE: automatic FEM-grade remeshing of TPMS (guaranteed
+# near-equilateral triangles) is a research problem: it needs surface
+# fitting or robust reparameterization (Gmsh stalls on TPMS,
+# HyperMesh-like fitters are specialized software). Out of the MVP.
+# Here we export a CLEAN mid-surface; analysis-grade quality, if
+# needed, comes from the solver's interactive remesh (PrePoMax,
 # Gmsh standalone).
 
 
-def export_fem(V, T, elem_fem, formato, path, log):
-    """Esporta la superficie media (V,T) in .inp (Abaqus/CalculiX) o
-    .msh (Gmsh 2.2), piu' un STL di servizio. Writer interni in puro
-    Python: nessuna dipendenza. La qualita' di calcolo (triangoli
-    quasi-equilateri) si ottiene con un remesh nel solutore, se serve.
-    Ritorna metriche di qualita' indicative."""
-    qual = _qualita_numpy(V, T)
-    if formato == "inp":
-        _scrivi_inp(V, T, path)
+def export_fem(V, T, elem_fem, fmt, path, log):
+    """Exports the mid-surface (V,T) to .inp (Abaqus/CalculiX) or
+    .msh (Gmsh 2.2), plus a helper STL. Internal writers in pure
+    Python: no dependencies. Analysis-grade quality (near-equilateral
+    triangles) is obtained with a remesh in the solver, if needed.
+    Returns indicative quality metrics."""
+    qual = _quality_numpy(V, T)
+    if fmt == "inp":
+        _write_inp(V, T, path)
     else:
-        _scrivi_msh(V, T, path)
+        _write_msh(V, T, path)
     log("FEM mesh saved: {}\n".format(path))
 
     stl = path.rsplit(".", 1)[0] + ".stl"
@@ -595,8 +594,8 @@ def export_fem(V, T, elem_fem, formato, path, log):
     return qual
 
 
-def _qualita_numpy(V, T):
-    """Metriche angolari della mesh (V,T) in puro numpy."""
+def _quality_numpy(V, T):
+    """Angular metrics of the (V,T) mesh in pure numpy."""
     P = V[T]
     a = P[:, 1] - P[:, 0]
     b = P[:, 2] - P[:, 1]
@@ -618,8 +617,8 @@ def _qualita_numpy(V, T):
             "ang_max": float(mx.max())}
 
 
-def _scrivi_inp(V, T, path):
-    """Writer Abaqus/CalculiX minimale: nodi + elementi shell S3."""
+def _write_inp(V, T, path):
+    """Minimal Abaqus/CalculiX writer: nodes + S3 shell elements."""
     with open(path, "w") as f:
         f.write("*NODE\n")
         for i, p in enumerate(V, 1):
@@ -631,8 +630,8 @@ def _scrivi_inp(V, T, path):
                 e, t[0] + 1, t[1] + 1, t[2] + 1))
 
 
-def _scrivi_msh(V, T, path):
-    """Writer Gmsh MSH 2.2 minimale: nodi + triangoli."""
+def _write_msh(V, T, path):
+    """Minimal Gmsh MSH 2.2 writer: nodes + triangles."""
     with open(path, "w") as f:
         f.write("$MeshFormat\n2.2 0 8\n$EndMeshFormat\n")
         f.write("$Nodes\n{}\n".format(len(V)))
@@ -647,7 +646,7 @@ def _scrivi_msh(V, T, path):
 
 
 # ======================================================================
-# GENERAZIONE
+# GENERATION
 # ======================================================================
 
 def _axis_samples(lo, hi, spacing):
@@ -655,7 +654,7 @@ def _axis_samples(lo, hi, spacing):
     return np.linspace(lo, hi, n, dtype=np.float32)
 
 
-def stima_punti(bb_min, bb_max, spacing):
+def estimate_points(bb_min, bb_max, spacing):
     pad = 2 * spacing
     tot = 1
     for a in range(3):
@@ -666,37 +665,37 @@ def stima_punti(bb_min, bb_max, spacing):
 
 
 # ======================================================================
-# PULIZIA MESH — geometria pronta per lo slicer (normali coerenti,
-# niente facce degeneri/duplicate). Calcolo puro su (V, T) numpy.
+# MESH CLEANUP — slicer-ready geometry (consistent normals, no
+# degenerate/duplicate faces). Pure computation on numpy (V, T).
 # ======================================================================
 
-def pulisci_mesh(V, T, eps_rel=1e-3, log=None):
-    """Ripulisce una mesh (V,T):
-      - salda i vertici vicini e rimuove i duplicati;
-      - elimina i triangoli degeneri (area ~0) e i duplicati;
-      - rende le normali coerenti orientando le facce per adiacenza
-        e rivolgendole verso l'esterno (volume con segno > 0).
-    Restituisce (V, T) puliti. Indipendente da FreeCAD."""
+def clean_mesh(V, T, eps_rel=1e-3, log=None):
+    """Cleans a (V,T) mesh:
+      - welds nearby vertices and removes duplicates;
+      - drops degenerate (area ~0) and duplicate triangles;
+      - makes normals consistent by orienting faces via adjacency
+        and pointing them outwards (signed volume > 0).
+    Returns clean (V, T). FreeCAD-independent."""
     V = np.asarray(V, dtype=np.float64)
     T = np.asarray(T, dtype=np.int64)
     if len(T) == 0:
         return V, T
 
-    # La mesh arriva GIA' saldata e watertight da salda_vertici(), e il
-    # Taubin sposta soltanto i vertici senza cambiare la topologia (nel log
-    # i bordi restano 0 fino a qui). Quindi NON ri-saldiamo e NON cancelliamo
-    # nulla:
-    #  - ri-saldare dopo il Taubin fonde i vertici di pareti sottili finiti
-    #    entro la tolleranza, pinza la maglia e apre buchi (il reticolo
-    #    regolare sui pannelli a bassa densita');
-    #  - cancellare triangoli per area/degenerazione toglie facce che
-    #    sigillano spigoli, aprendo altri buchi.
-    # L'unica cosa utile e sicura qui e' garantire il verso d'insieme delle
-    # normali; l'orientamento fine e' poi affidato a harmonizeNormals() di
-    # FreeCAD. Tutto il resto e' identita'.
+    # The mesh arrives ALREADY welded and watertight from weld_vertices(),
+    # and Taubin only moves vertices without changing topology (in the log
+    # the open edges stay 0 up to here). So we do NOT re-weld and do NOT
+    # delete anything:
+    #  - re-welding after Taubin merges thin-wall vertices that ended up
+    #    within tolerance, pinching the mesh and opening holes (the regular
+    #    grid pattern on low-density panels);
+    #  - deleting triangles by area/degeneracy removes faces that seal
+    #    edges, opening other holes.
+    # The only useful, safe thing here is ensuring the overall normal
+    # direction; fine orientation is then left to FreeCAD's
+    # harmonizeNormals(). Everything else is identity.
     Vn = np.asarray(V, dtype=np.float64)
 
-    vol = _volume_segno(Vn, T)
+    vol = _signed_volume(Vn, T)
     if vol < 0:
         T = T[:, ::-1].copy()
 
@@ -707,8 +706,8 @@ def pulisci_mesh(V, T, eps_rel=1e-3, log=None):
     return Vn, T
 
 
-def _volume_segno(V, T):
-    """Volume con segno (somma dei tetraedri all'origine)."""
+def _signed_volume(V, T):
+    """Signed volume (sum of tetrahedra at the origin)."""
     a = V[T[:, 0]]
     b = V[T[:, 1]]
     c = V[T[:, 2]]
