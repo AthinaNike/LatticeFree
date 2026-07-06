@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-LatticeFree — comando GUI
-==========================
-Definisce i comandi del workbench: un bottone per ogni TPMS (giroide,
-Schwarz P, Diamond), tutti con la stessa finestra parametri
-(TPMSDialog). Genera l'infill con shell, raccordo, grading, pulizia
-mesh e (opzionale) export FEM. Tutta la matematica vive in engine.py;
-qui c'e' solo l'interfaccia e l'orchestrazione FreeCAD.
+LatticeFree — GUI commands
+===========================
+Defines the workbench commands: one button per TPMS (Gyroid,
+Schwarz P, Diamond), all sharing the same parameter dialog
+(TPMSDialog). Generates the infill with shell, fillet, grading, mesh
+cleanup and (optional) FEM export. All the math lives in engine.py;
+here there is only the interface and the FreeCAD orchestration.
 """
 
 import os
@@ -25,51 +25,51 @@ except ImportError:
 from . import engine
 
 
-def genera(cell_size, densita, spacing, t_shell, demo_box,
-           target, modalita, n_smooth, riduzione, r_blend,
+def generate(cell_size, density, spacing, t_shell, demo_box,
+           target, mode, n_smooth, riduzione, r_blend,
            fem_export, fem_elem, fem_formato,
-           grad_on, grad_dens_int, nozzle_mm, tpms=engine.TPMS_DEFAULT):
+           grad_on, grad_core_density, nozzle_mm, tpms=engine.TPMS_DEFAULT):
     log = App.Console.PrintMessage
-    etichetta = engine.TPMS[tpms]["label"]
-    thickness = engine.densita_to_isovalore(densita, tpms)
+    label = engine.TPMS[tpms]["label"]
+    thickness = engine.density_to_isovalue(density, tpms)
 
     # ---------------------------------------------------------------
-    #  Report dei parametri di generazione
+    #  Generation parameters report
     # ---------------------------------------------------------------
     sep = "=" * 56
     log(sep + "\n")
     log("  LatticeFree  -  generation parameters\n")
     log(sep + "\n")
-    log("  TPMS:              {}\n".format(etichetta))
+    log("  TPMS:              {}\n".format(label))
     if target is not None:
         log("  Component:         {}\n".format(target.Label))
     else:
         log("  Component:         demo cube ({:.1f} mm)\n".format(demo_box))
-    log("  Output:            {}\n".format(modalita))
+    log("  Output:            {}\n".format(mode))
     log("  TPMS cell:         {:.2f} mm\n".format(cell_size))
     log("  Outer density:     {:.0f}%   (isovalue {:.3f}, "
         "wall {:.2f} mm)\n".format(
-            densita * 100.0, thickness,
-            engine.spessore_parete_mm(thickness, cell_size, tpms)))
+            density * 100.0, thickness,
+            engine.wall_thickness_mm(thickness, cell_size, tpms)))
     if grad_on:
         log("  Grading:           ON  ({:.0f}% skin -> {:.0f}% core, "
             "nozzle {:.2f} mm)\n".format(
-                densita * 100.0, grad_dens_int * 100.0, nozzle_mm))
+                density * 100.0, grad_core_density * 100.0, nozzle_mm))
     else:
         log("  Grading:           OFF\n")
     log("  Shell:             {:.2f} mm{}\n".format(
         t_shell, "" if t_shell > 0 else "   (exposed lattice)"))
     log("  Fillet:            {:.2f} mm\n".format(r_blend))
     ratio = (cell_size / spacing) if spacing > 0 else 0.0
-    # parete piu' sottile davvero presente (grading incluso): e' lei che
-    # detta la risoluzione minima (>= ~3 elementi per parete)
-    rho_piu_sottile = min(densita, grad_dens_int) if grad_on else densita
-    w_min = engine.spessore_parete_mm(
-        engine.densita_to_isovalore(rho_piu_sottile, tpms), cell_size, tpms)
-    el_per_parete = (w_min / spacing) if spacing > 0 else 0.0
+    # thinnest wall actually present (grading included): it dictates
+    # the minimum resolution (>= ~3 elements per wall)
+    rho_thinnest = min(density, grad_core_density) if grad_on else density
+    w_min = engine.wall_thickness_mm(
+        engine.density_to_isovalue(rho_thinnest, tpms), cell_size, tpms)
+    el_per_wall = (w_min / spacing) if spacing > 0 else 0.0
     log("  Grid element:      {:.3f} mm   (cell/{:.0f}, "
-        "{:.1f} el./min wall)\n".format(spacing, ratio, el_per_parete))
-    if el_per_parete < 2.0:
+        "{:.1f} el./min wall)\n".format(spacing, ratio, el_per_wall))
+    if el_per_wall < 2.0:
         App.Console.PrintWarning(
             "  WARNING: minimum wall {:.2f} mm < 2 elements "
             "({:.3f} mm): risk of under-sampling holes. "
@@ -86,7 +86,7 @@ def genera(cell_size, densita, spacing, t_shell, demo_box,
         log("  FEM export:        no\n")
     log(sep + "\n")
 
-    doc = App.ActiveDocument or App.newDocument("Giroide")
+    doc = App.ActiveDocument or App.newDocument("LatticeFree")
 
     if target is not None:
         bb = target.Shape.BoundBox
@@ -111,53 +111,53 @@ def genera(cell_size, densita, spacing, t_shell, demo_box,
         P = np.array([[p.x, p.y, p.z] for p in pts], dtype=np.float64)
         F = np.array(fcs, dtype=np.int64)
         log("Tessellation: {} triangles\n".format(len(F)))
-        occ = engine.occupancy_da_tris(P, F, x, y, z, spacing, log)
+        occ = engine.occupancy_from_tris(P, F, x, y, z, spacing, log)
         band = min(max(2.5 * spacing,
                        t_shell + r_blend + 1.5 * spacing),
                    10.0 * spacing)
-        sdf = engine.sdf_grezzo(occ, spacing, band + 2 * spacing)
+        sdf = engine.sdf_coarse(occ, spacing, band + 2 * spacing)
         del occ
-        sdf = engine.raffina_banda(P, F, x, y, z, sdf, band, log)
+        sdf = engine.refine_band(P, F, x, y, z, sdf, band, log)
     else:
         Xg, Yg, Zg = np.meshgrid(x, y, z, indexing="ij")
         sdf = engine.sdf_box_demo(Xg, Yg, Zg, demo_box)
         del Xg, Yg, Zg
 
-    log("{} field and combination...\n".format(etichetta))
+    log("{} field and combination...\n".format(label))
     X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
 
-    # --- campo di spessore: costante o graduato (denso fuori) ---
+    # --- thickness field: constant or graded (dense outside) ---
     if grad_on:
-        # densita' interna clampata al minimo stampabile per questa cella
-        rho_min = engine.densita_min_stampabile(cell_size, nozzle_mm, tpms)
-        rho_int = max(grad_dens_int, rho_min, engine.RHO_MIN)
-        if rho_int > grad_dens_int + 1e-6:
+        # core density clamped to the printable minimum for this cell
+        rho_min = engine.min_printable_density(cell_size, nozzle_mm, tpms)
+        rho_int = max(grad_core_density, rho_min, engine.RHO_MIN)
+        if rho_int > grad_core_density + 1e-6:
             App.Console.PrintWarning(
                 "Core density {:.0f}% below the printable minimum "
                 "({:.0f}% for cell {:.1f}mm, nozzle {:.2f}mm): "
                 "clamped to {:.0f}%.\n".format(
-                    grad_dens_int * 100, rho_min * 100, cell_size,
+                    grad_core_density * 100, rho_min * 100, cell_size,
                     nozzle_mm, rho_int * 100))
-        t_ext = engine.densita_to_isovalore(densita, tpms)
-        t_int = engine.densita_to_isovalore(rho_int, tpms)
-        # sdf>0 dentro il pezzo; normalizzo per il semi-spessore locale.
-        # profondita' = sdf clampato; uso la banda piena come scala max,
-        # ma per gradiente "fino al cuore" normalizzo sul max sdf reale.
+        t_ext = engine.density_to_isovalue(density, tpms)
+        t_int = engine.density_to_isovalue(rho_int, tpms)
+        # sdf>0 inside the part; normalized by the local half-thickness.
+        # depth = clamped sdf; the full band is the max scale, but for a
+        # "down to the core" gradient we normalize on the real sdf max.
         sdf_pos = np.maximum(sdf, 0.0)
         s_max = float(sdf_pos.max()) if sdf_pos.max() > 0 else 1.0
         u = engine.smoothstep(sdf_pos / s_max)        # 0 pelle, 1 cuore
         t_field = (t_ext + (t_int - t_ext) * u).astype(np.float32)
         log("Grading: density {:.0f}% (skin) -> {:.0f}% (core), "
             "wall thickness {:.2f}-{:.2f} mm\n".format(
-                densita * 100, rho_int * 100,
-                engine.spessore_parete_mm(t_int, cell_size, tpms),
-                engine.spessore_parete_mm(t_ext, cell_size, tpms)))
-        gy = engine.campo_tpms(X, Y, Z, cell_size, t_field, tpms)
+                density * 100, rho_int * 100,
+                engine.wall_thickness_mm(t_int, cell_size, tpms),
+                engine.wall_thickness_mm(t_ext, cell_size, tpms)))
+        gy = engine.tpms_field(X, Y, Z, cell_size, t_field, tpms)
         del t_field
     else:
-        gy = engine.campo_tpms(X, Y, Z, cell_size, thickness, tpms)
+        gy = engine.tpms_field(X, Y, Z, cell_size, thickness, tpms)
     del X, Y, Z
-    F_field = engine.campo_finale(sdf, gy, t_shell, r_blend)
+    F_field = engine.final_field(sdf, gy, t_shell, r_blend)
     del sdf, gy
     F_field += np.float32(1.0e-4) * spacing
 
@@ -167,7 +167,7 @@ def genera(cell_size, densita, spacing, t_shell, demo_box,
     log("Raw triangles: {}\n".format(len(triangles)))
 
     log("Welding vertices...\n")
-    V, T = engine.salda_vertici(triangles, spacing * 1e-3)
+    V, T = engine.weld_vertices(triangles, spacing * 1e-3)
     del triangles
     log("Vertices: {}, triangles: {}\n".format(len(V), len(T)))
 
@@ -176,20 +176,20 @@ def genera(cell_size, densita, spacing, t_shell, demo_box,
         V = engine.taubin(V, T, n_smooth)
 
     log("Mesh cleanup (normal orientation)...\n")
-    V, T = engine.pulisci_mesh(V, T, log=log)
+    V, T = engine.clean_mesh(V, T, log=log)
 
     log("Building FreeCAD mesh...\n")
     soup = V[T]
     m = Mesh.Mesh([[tuple(p) for p in tri] for tri in soup.tolist()])
-    # Salda i punti coincidenti della zuppa di triangoli: indispensabile e
-    # NON distruttivo (i punti sono bit-identici, quindi fonde solo veri
-    # duplicati e ricostruisce la connettivita' watertight).
+    # Weld the coincident points of the triangle soup: essential and
+    # NON-destructive (points are bit-identical, so it only merges true
+    # duplicates and rebuilds the watertight connectivity).
     m.removeDuplicatedPoints()
-    # NB: NON chiamiamo removeDegenerations()/removeNonManifolds(): cancellano
-    # facce e, su una mesh gia' chiusa, ogni faccia rimossa apre un buco.
-    # Chiudiamo invece i micro-buchi residui in modo COSTRUTTIVO: fillupHoles
-    # aggiunge facce, non ne toglie, quindi non puo' aprire nuovi bordi (il
-    # limite di lunghezza tiene chiusi solo i buchi piccoli da artefatto).
+    # NB: we do NOT call removeDegenerations()/removeNonManifolds(): they
+    # delete faces and, on an already-closed mesh, every removed face opens
+    # a hole. Residual micro-holes are closed CONSTRUCTIVELY instead:
+    # fillupHoles adds faces, never removes them, so it cannot open new
+    # borders (the length limit only closes small artifact holes).
     if hasattr(m, "fillupHoles"):
         try:
             m.fillupHoles(200)
@@ -207,9 +207,9 @@ def genera(cell_size, densita, spacing, t_shell, demo_box,
             App.Console.PrintWarning(
                 "Decimation not available: {}\n".format(e))
 
-    nome_obj = "{}_ShellInfill".format(etichetta.replace(" ", ""))
-    if modalita == "mesh":
-        mobj = doc.addObject("Mesh::Feature", nome_obj)
+    obj_name = "{}_ShellInfill".format(label.replace(" ", ""))
+    if mode == "mesh":
+        mobj = doc.addObject("Mesh::Feature", obj_name)
         mobj.Mesh = m
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             Gui.getMainWindow(), "Save STL",
@@ -225,7 +225,7 @@ def genera(cell_size, densita, spacing, t_shell, demo_box,
         solid = Part.makeSolid(shape)
         if solid.Volume < 0:
             solid.reverse()
-        obj = doc.addObject("Part::Feature", nome_obj)
+        obj = doc.addObject("Part::Feature", obj_name)
         obj.Shape = solid
         if target is not None:
             target.ViewObject.Visibility = False
@@ -240,16 +240,16 @@ def genera(cell_size, densita, spacing, t_shell, demo_box,
             tgt_P = np.array([[p.x, p.y, p.z] for p in pts],
                              dtype=np.float64)
             tgt_tris = np.array(fcs, dtype=np.int64)
-        Vm, Tm = engine.superficie_media(bb_min, bb_max, cell_size, spacing,
-                                  tgt_tris, tgt_P, log, tipo=tpms)
+        Vm, Tm = engine.mid_surface(bb_min, bb_max, cell_size, spacing,
+                                  tgt_tris, tgt_P, log, tpms_type=tpms)
         log("Mid-surface: {} vertices, {} triangles\n"
             .format(len(Vm), len(Tm)))
         ext = "msh" if fem_formato == "msh" else "inp"
-        filtro = ("Gmsh mesh (*.msh)" if ext == "msh"
+        file_filter = ("Gmsh mesh (*.msh)" if ext == "msh"
                   else "Abaqus/CalculiX (*.inp)")
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             Gui.getMainWindow(), "Save FEM mesh",
-            os.path.expanduser("~/{}_fem.{}".format(tpms, ext)), filtro)
+            os.path.expanduser("~/{}_fem.{}".format(tpms, ext)), file_filter)
         if path:
             qual = engine.export_fem(Vm, Tm, fem_elem, ext, path, log)
             if qual:
@@ -271,18 +271,18 @@ def genera(cell_size, densita, spacing, t_shell, demo_box,
 
 
 # ======================================================================
-# DIALOGO
+# DIALOG
 # ======================================================================
 
 class TPMSDialog(QtWidgets.QDialog):
-    """Finestra parametri, unica per tutti i TPMS: cambia solo il tipo
-    (e quindi calibrazione densita'/parete), i parametri sono identici."""
+    """Parameter dialog, shared by all TPMS: only the tpms_type changes
+    (hence the density/wall calibration), the parameters are identical."""
 
-    def __init__(self, tipo=engine.TPMS_DEFAULT):
+    def __init__(self, tpms_type=engine.TPMS_DEFAULT):
         super(TPMSDialog, self).__init__(Gui.getMainWindow())
-        self.tipo = tipo
-        self.etichetta = engine.TPMS[tipo]["label"]
-        self.setWindowTitle("LatticeFree — {}".format(self.etichetta))
+        self.tpms_type = tpms_type
+        self.label = engine.TPMS[tpms_type]["label"]
+        self.setWindowTitle("LatticeFree — {}".format(self.label))
         self.setMinimumWidth(420)
         form = QtWidgets.QFormLayout(self)
 
@@ -316,7 +316,7 @@ class TPMSDialog(QtWidgets.QDialog):
         self.spin_cell.setRange(0.5, 500.0)
         self.spin_cell.setValue(10.0)
         self.spin_cell.setSuffix(" mm")
-        form.addRow("{} cell size:".format(self.etichetta),
+        form.addRow("{} cell size:".format(self.label),
                     self.spin_cell)
 
         self.spin_dens = QtWidgets.QDoubleSpinBox()
@@ -330,7 +330,7 @@ class TPMSDialog(QtWidgets.QDialog):
         self.label_dens.setStyleSheet("color: gray;")
         form.addRow("", self.label_dens)
 
-        # --- Grading di densita' (denso fuori, leggero dentro) ---
+        # --- Density grading (dense outside, light inside) ---
         self.check_grad = QtWidgets.QCheckBox(
             "Grading: dense skin, light core")
         form.addRow(self.check_grad)
@@ -360,8 +360,8 @@ class TPMSDialog(QtWidgets.QDialog):
             self.spin_dens_int.setEnabled(on)
             self.spin_nozzle.setEnabled(on)
             self.label_grad.setVisible(on)
-            self._aggiorna_grad()
-            self._auto_elemento()   # la parete min cambia col grading
+            self._update_grading()
+            self._auto_element()   # la parete min cambia col grading
         self.check_grad.toggled.connect(_toggle_grad)
 
         self.spin_blend = QtWidgets.QDoubleSpinBox()
@@ -371,20 +371,20 @@ class TPMSDialog(QtWidgets.QDialog):
         self.spin_blend.setSuffix(" mm")
         form.addRow("Shell-lattice fillet radius:", self.spin_blend)
 
-        riga_elem = QtWidgets.QHBoxLayout()
+        elem_row = QtWidgets.QHBoxLayout()
         self.spin_elem = QtWidgets.QDoubleSpinBox()
         self.spin_elem.setRange(0.05, 10.0)
         self.spin_elem.setSingleStep(0.05)
         self.spin_elem.setValue(round(10.0 / 15.0, 2))
         self.spin_elem.setSuffix(" mm")
-        # L'auto V0 era cella/15: alle basse densita' la parete diventava
-        # sotto-griglia (i "buchi esagonali"). Ora l'auto insegue anche la
-        # parete piu' sottile: min(cella/15, parete_min/3).
+        # The V0 auto was cell/15: at low densities the wall became
+        # sub-grid (the "hexagonal holes"). The auto now also tracks the
+        # thinnest wall: min(cell/15, min_wall/3).
         self.check_auto = QtWidgets.QCheckBox("auto (cell/15 and wall/3)")
         self.check_auto.setChecked(True)
-        riga_elem.addWidget(self.spin_elem)
-        riga_elem.addWidget(self.check_auto)
-        form.addRow("Grid element size:", riga_elem)
+        elem_row.addWidget(self.spin_elem)
+        elem_row.addWidget(self.check_auto)
+        form.addRow("Grid element size:", elem_row)
 
         self.spin_smooth = QtWidgets.QSpinBox()
         self.spin_smooth.setRange(0, 25)
@@ -403,7 +403,7 @@ class TPMSDialog(QtWidgets.QDialog):
         self.spin_demo.setSuffix(" mm")
         form.addRow("Demo cube side:", self.spin_demo)
 
-        # --- Export FEM (superficie media) -----------------------------
+        # --- FEM export (mid-surface) ----------------------------------
         self.check_fem = QtWidgets.QCheckBox(
             "Export mid-surface for FEM (shell)")
         form.addRow(self.check_fem)
@@ -442,77 +442,77 @@ class TPMSDialog(QtWidgets.QDialog):
         self.label_info.setWordWrap(True)
         form.addRow(self.label_info)
 
-        self.spin_cell.valueChanged.connect(self._auto_elemento)
-        self.check_auto.toggled.connect(self._auto_elemento)
-        self.spin_dens.valueChanged.connect(self._aggiorna_densita)
-        # la densita' (e il grading) determinano la parete piu' sottile,
-        # quindi anche l'elemento auto
-        self.spin_dens.valueChanged.connect(self._auto_elemento)
-        self.spin_dens_int.valueChanged.connect(self._auto_elemento)
-        self.spin_cell.valueChanged.connect(self._aggiorna_grad)
-        self.spin_dens_int.valueChanged.connect(self._aggiorna_grad)
-        self.spin_nozzle.valueChanged.connect(self._aggiorna_grad)
+        self.spin_cell.valueChanged.connect(self._auto_element)
+        self.check_auto.toggled.connect(self._auto_element)
+        self.spin_dens.valueChanged.connect(self._update_density)
+        # density (and grading) determine the thinnest wall, hence
+        # also the auto element
+        self.spin_dens.valueChanged.connect(self._auto_element)
+        self.spin_dens_int.valueChanged.connect(self._auto_element)
+        self.spin_cell.valueChanged.connect(self._update_grading)
+        self.spin_dens_int.valueChanged.connect(self._update_grading)
+        self.spin_nozzle.valueChanged.connect(self._update_grading)
         for w in (self.spin_elem, self.spin_demo, self.spin_shell,
                   self.spin_blend):
-            w.valueChanged.connect(self._aggiorna_stima)
-        self.combo_target.currentIndexChanged.connect(self._aggiorna_stima)
-        self.combo_mode.currentIndexChanged.connect(self._aggiorna_stima)
-        self._aggiorna_densita()
-        self._aggiorna_grad()
-        self._aggiorna_stima()
+            w.valueChanged.connect(self._update_estimate)
+        self.combo_target.currentIndexChanged.connect(self._update_estimate)
+        self.combo_mode.currentIndexChanged.connect(self._update_estimate)
+        self._update_density()
+        self._update_grading()
+        self._update_estimate()
 
-        bottoni = QtWidgets.QDialogButtonBox()
-        bottoni.addButton("Generate", QtWidgets.QDialogButtonBox.AcceptRole)
-        bottoni.addButton(QtWidgets.QDialogButtonBox.Cancel)
-        bottoni.accepted.connect(self._conferma)
-        bottoni.rejected.connect(self.reject)
-        form.addRow(bottoni)
+        buttons = QtWidgets.QDialogButtonBox()
+        buttons.addButton("Generate", QtWidgets.QDialogButtonBox.AcceptRole)
+        buttons.addButton(QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._confirm)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
 
-    def _aggiorna_densita(self, *args):
+    def _update_density(self, *args):
         rho = self.spin_dens.value() / 100.0
-        t = engine.densita_to_isovalore(rho, self.tipo)
-        rho_eff = engine.isovalore_to_densita(t, self.tipo)
+        t = engine.density_to_isovalue(rho, self.tpms_type)
+        rho_eff = engine.isovalue_to_density(t, self.tpms_type)
         self.label_dens.setText(
             "resulting isovalue {:.3f}  |  effective density "
             "{:.1f}%  (useful range {:.0f}-{:.0f}%)".format(
                 t, rho_eff * 100.0, engine.RHO_MIN * 100.0, engine.RHO_MAX * 100.0))
 
-    def _aggiorna_grad(self, *args):
+    def _update_grading(self, *args):
         if not self.check_grad.isChecked():
             return
         L = self.spin_cell.value()
         noz = self.spin_nozzle.value()
-        rho_min = engine.densita_min_stampabile(L, noz, self.tipo)
+        rho_min = engine.min_printable_density(L, noz, self.tpms_type)
         rho_int = self.spin_dens_int.value() / 100.0
-        t_int = engine.densita_to_isovalore(max(rho_int, rho_min), self.tipo)
-        t_ext = engine.densita_to_isovalore(self.spin_dens.value() / 100.0,
-                                            self.tipo)
-        w_int = engine.spessore_parete_mm(t_int, L, self.tipo)
-        w_ext = engine.spessore_parete_mm(t_ext, L, self.tipo)
-        avviso = ""
+        t_int = engine.density_to_isovalue(max(rho_int, rho_min), self.tpms_type)
+        t_ext = engine.density_to_isovalue(self.spin_dens.value() / 100.0,
+                                            self.tpms_type)
+        w_int = engine.wall_thickness_mm(t_int, L, self.tpms_type)
+        w_ext = engine.wall_thickness_mm(t_ext, L, self.tpms_type)
+        warn_txt = ""
         if rho_int < rho_min - 1e-6:
-            avviso = ("  -> below the printable minimum {:.0f}%, "
+            warn_txt = ("  -> below the printable minimum {:.0f}%, "
                       "will be clamped".format(rho_min * 100))
         self.label_grad.setText(
             "min printable density {:.0f}% (cell {:.1f}mm, nozzle "
             "{:.2f}mm) | wall {:.2f}-{:.2f} mm{}".format(
-                rho_min * 100, L, noz, w_int, w_ext, avviso))
+                rho_min * 100, L, noz, w_int, w_ext, warn_txt))
 
-    def _rho_piu_sottile(self):
-        """Densita' della parete piu' sottile davvero presente."""
+    def _thinnest_rho(self):
+        """Density of the thinnest wall actually present."""
         rho = self.spin_dens.value() / 100.0
         if self.check_grad.isChecked():
             rho = min(rho, self.spin_dens_int.value() / 100.0)
         return rho
 
-    def _auto_elemento(self, *args):
+    def _auto_element(self, *args):
         if self.check_auto.isChecked():
-            val = engine.spacing_consigliato(
-                self.spin_cell.value(), self._rho_piu_sottile(), self.tipo)
+            val = engine.recommended_spacing(
+                self.spin_cell.value(), self._thinnest_rho(), self.tpms_type)
             self.spin_elem.setValue(round(val, 2))
-        self._aggiorna_stima()
+        self._update_estimate()
 
-    def _bb_corrente(self):
+    def _current_bb(self):
         nome = self.combo_target.currentData()
         if nome and App.ActiveDocument:
             obj = App.ActiveDocument.getObject(nome)
@@ -523,47 +523,47 @@ class TPMSDialog(QtWidgets.QDialog):
         h = self.spin_demo.value() / 2.0
         return ((-h, -h, -h), (h, h, h))
 
-    def _n_punti(self):
-        bb_min, bb_max = self._bb_corrente()
-        return engine.stima_punti(bb_min, bb_max, self.spin_elem.value())
+    def _n_points(self):
+        bb_min, bb_max = self._current_bb()
+        return engine.estimate_points(bb_min, bb_max, self.spin_elem.value())
 
-    def _aggiorna_stima(self, *args):
-        n = self._n_punti()
+    def _update_estimate(self, *args):
+        n = self._n_points()
         mode = self.combo_mode.currentData()
-        avvisi = ["Grid: ~{:.1f} M points.".format(n / 1e6)]
+        hints = ["Grid: ~{:.1f} M points.".format(n / 1e6)]
         sp = self.spin_elem.value()
-        # spia buchi da sotto-campionamento: parete min < 2 elementi
-        t_min = engine.densita_to_isovalore(self._rho_piu_sottile(),
-                                            self.tipo)
-        w_min = engine.spessore_parete_mm(t_min, self.spin_cell.value(),
-                                          self.tipo)
+        # under-sampling hole tell-tale: min wall < 2 elements
+        t_min = engine.density_to_isovalue(self._thinnest_rho(),
+                                            self.tpms_type)
+        w_min = engine.wall_thickness_mm(t_min, self.spin_cell.value(),
+                                          self.tpms_type)
         if sp > 0 and w_min < 2.0 * sp:
-            avvisi.append("WARNING: min wall {:.2f} mm < 2 elements "
+            hints.append("WARNING: min wall {:.2f} mm < 2 elements "
                           "-> under-sampling holes; use element "
                           "<= {:.3f} mm (or auto).".format(w_min, w_min / 3.0))
         sh = self.spin_shell.value()
         if 0.0 < sh < 2.5 * sp:
-            avvisi.append("Shell too thin for the grid: use element "
+            hints.append("Shell too thin for the grid: use element "
                           "<= {:.2f} mm.".format(sh / 2.5))
         rb = self.spin_blend.value()
         if 0.0 < rb < 2.0 * sp:
-            avvisi.append("Fillet < 2 elements: barely visible, "
+            hints.append("Fillet < 2 elements: barely visible, "
                           "use radius >= {:.2f} mm.".format(2.0 * sp))
         if n > 40e6:
-            avvisi.append("TOO MANY points.")
+            hints.append("TOO MANY points.")
         elif mode == "solido" and n > 3e6:
-            avvisi.append("CAD solid: VERY slow, consider Mesh only.")
+            hints.append("CAD solid: VERY slow, consider Mesh only.")
         elif n > 15e6:
-            avvisi.append("Heavy but feasible as mesh.")
+            hints.append("Heavy but feasible as mesh.")
         else:
-            avvisi.append("OK.")
+            hints.append("OK.")
         if not engine.HAVE_SCIPY:
-            avvisi.append("(scipy missing: far field approximated, "
+            hints.append("(scipy missing: far field approximated, "
                           "near-surface band still exact)")
-        self.label_info.setText(" ".join(avvisi))
+        self.label_info.setText(" ".join(hints))
 
-    def _conferma(self):
-        if self._n_punti() > 40e6:
+    def _confirm(self):
+        if self._n_points() > 40e6:
             QtWidgets.QMessageBox.warning(
                 self, "Grid too fine",
                 "Over 40 million points: increase the element "
@@ -571,19 +571,19 @@ class TPMSDialog(QtWidgets.QDialog):
             return
         self.accept()
 
-    def parametri(self):
+    def parameters(self):
         nome = self.combo_target.currentData()
         target = None
         if nome and App.ActiveDocument:
             target = App.ActiveDocument.getObject(nome)
         return dict(
             cell_size=self.spin_cell.value(),
-            densita=self.spin_dens.value() / 100.0,
+            density=self.spin_dens.value() / 100.0,
             spacing=self.spin_elem.value(),
             t_shell=self.spin_shell.value(),
             demo_box=self.spin_demo.value(),
             target=target,
-            modalita=self.combo_mode.currentData(),
+            mode=self.combo_mode.currentData(),
             n_smooth=self.spin_smooth.value(),
             riduzione=self.spin_decim.value(),
             r_blend=self.spin_blend.value(),
@@ -591,27 +591,27 @@ class TPMSDialog(QtWidgets.QDialog):
             fem_elem=self.spin_fem_elem.value(),
             fem_formato=self.combo_fem_fmt.currentData(),
             grad_on=self.check_grad.isChecked(),
-            grad_dens_int=self.spin_dens_int.value() / 100.0,
+            grad_core_density=self.spin_dens_int.value() / 100.0,
             nozzle_mm=self.spin_nozzle.value(),
-            tpms=self.tipo,
+            tpms=self.tpms_type,
         )
 
 
-# compatibilita' V0
+# V0 compatibility
 GyroidDialog = TPMSDialog
 
 # ======================================================================
-# COMANDO FREECAD
+# FREECAD COMMANDS
 # ======================================================================
 
-class CommandGeneraTPMS:
-    """Comando 'Genera infill <TPMS>': un bottone per tipo, stessa
-    finestra e stessi parametri per tutti."""
+class CommandGenerateTPMS:
+    """'Generate <TPMS> infill' command: one button per tpms_type,
+    same dialog and same parameters for all."""
 
-    def __init__(self, tipo, icona):
-        self.tipo = tipo
+    def __init__(self, tpms_type, icona):
+        self.tpms_type = tpms_type
         self.icona = icona
-        self.etichetta = engine.TPMS[tipo]["label"]
+        self.label = engine.TPMS[tpms_type]["label"]
 
     def GetResources(self):
         icondir = os.path.join(App.getUserAppDataDir(), "Mod",
@@ -621,20 +621,20 @@ class CommandGeneraTPMS:
             icon = os.path.join(icondir, "freelattice.svg")
         return {
             "Pixmap": icon,
-            "MenuText": "Generate {} infill".format(self.etichetta),
+            "MenuText": "Generate {} infill".format(self.label),
             "ToolTip": ("Fills a solid with a {} infill: shell, "
                         "fillet, density, grading, FEM export."
-                        .format(self.etichetta)),
+                        .format(self.label)),
         }
 
     def IsActive(self):
         return App.ActiveDocument is not None or True
 
     def Activated(self):
-        dlg = TPMSDialog(self.tipo)
+        dlg = TPMSDialog(self.tpms_type)
         if dlg.exec_() == QtWidgets.QDialog.Accepted:
             try:
-                genera(**dlg.parametri())
+                generate(**dlg.parameters())
             except Exception as e:
                 import traceback
                 App.Console.PrintError(
@@ -647,15 +647,15 @@ class CommandGeneraTPMS:
             App.Console.PrintMessage("LatticeFree: cancelled.\n")
 
 
-COMANDI_TPMS = ["FreeLattice_Gyroid", "FreeLattice_SchwarzP",
+TPMS_COMMANDS = ["FreeLattice_Gyroid", "FreeLattice_SchwarzP",
                 "FreeLattice_Diamond"]
 
 Gui.addCommand("FreeLattice_Gyroid",
-               CommandGeneraTPMS("gyroid", "tpms_gyroid.svg"))
+               CommandGenerateTPMS("gyroid", "tpms_gyroid.svg"))
 Gui.addCommand("FreeLattice_SchwarzP",
-               CommandGeneraTPMS("schwarz_p", "tpms_schwarz_p.svg"))
+               CommandGenerateTPMS("schwarz_p", "tpms_schwarz_p.svg"))
 Gui.addCommand("FreeLattice_Diamond",
-               CommandGeneraTPMS("diamond", "tpms_diamond.svg"))
-# compatibilita' V0: il vecchio nome apre il giroide
+               CommandGenerateTPMS("diamond", "tpms_diamond.svg"))
+# V0 compatibility: il vecchio nome apre il giroide
 Gui.addCommand("FreeLattice_Genera",
-               CommandGeneraTPMS("gyroid", "tpms_gyroid.svg"))
+               CommandGenerateTPMS("gyroid", "tpms_gyroid.svg"))
