@@ -643,6 +643,136 @@ def verify(model, rho, u, sy, su, C2, m, z_factor=1.0, build_axis=2,
     return out
 
 
+# ======================================================================
+# STRENGTH-DRIVEN SIZING (minimum mass for a target safety factor)
+# ======================================================================
+
+def lattice_fs(model, rho, u, sy, C2, m, z_factor=1.0, build_axis=2):
+    """Yield safety factor of the LATTICE part of each element (same
+    criteria as verify(): von Mises in-plane, tensile stress along the
+    build axis against z_factor * strength). 1e9 where unloaded."""
+    S = element_stress_unit(model, u)
+    vm1 = von_mises(S)
+    sz1 = np.maximum(S[:, build_axis], 0.0)
+    Elat = model.Es * model.C * rho ** model.n
+    strength = C2 * rho ** m * sy
+    with np.errstate(divide="ignore", invalid="ignore"):
+        a = strength / (Elat * vm1)
+        b = strength * z_factor / (Elat * sz1)
+    fs = np.minimum(a, b)
+    return np.nan_to_num(fs, nan=1e9, posinf=1e9)
+
+
+def size_for_strength(model, fs_target, sy, C2, m, rho_min, rho_max,
+                      filter_radius, z_factor=1.0, build_axis=2,
+                      maxit=40, tol_rho=0.01, cg_tol=1e-6, callback=None,
+                      log=None):
+    """Minimum lattice mass such that the yield safety factor of the
+    lattice is >= fs_target (within the printable density bounds).
+
+    Bisection on the mean density: at each step the stiffness-optimal
+    density map for that mass is computed with optimize(), then its
+    lattice safety factor is checked (same criteria as verify()). The
+    lightest map that passes is returned.
+
+    Why not a classic fully-stressed (stress-ratio) update: with a
+    solid shell the lattice is largely strain-controlled, and since
+    stiffness ~ rho^n and strength ~ rho^m with n close to m, raising
+    the local density barely raises the local safety factor; the
+    stress-ratio iteration then converges to an infeasible design.
+
+    Also finds, by bisection, the UNIFORM lattice density that meets
+    the same fs_target, for a like-for-like mass comparison.
+    """
+    log = log or (lambda s: None)
+    t0 = time.time()
+    model.check()
+    design = model.phi_e < 0.999
+    inner = ~boundary_elements(model)
+    probe = inner & design
+    if not probe.any():
+        probe = design if design.any() else np.ones(model.nel, bool)
+    quiet = lambda s: None
+    step = [0]
+    cancelled = [False]
+
+    def fs_min_of(rho, u):
+        return float(lattice_fs(model, rho, u, sy, C2, m, z_factor,
+                                build_axis)[probe].min())
+
+    def evaluate(mean):
+        step[0] += 1
+        r = optimize(model, mean, rho_min, rho_max, filter_radius,
+                     maxit=maxit, cg_tol=cg_tol, log=quiet)
+        f = fs_min_of(r["rho_e"], r["u"])
+        log("  step {:2d}: mean density {:.1f}%  ->  lattice FS min {:.2f}"
+            "  ({} it.)\n".format(step[0], mean * 100, f, r["iterations"]))
+        if callback is not None and callback(step[0], r["compliance"],
+                                             mean, f) is False:
+            cancelled[0] = True
+        return r, f
+
+    lo = min(rho_max, rho_min + 0.01)
+    hi = rho_max - 1e-4
+    r_hi, f_hi = evaluate(hi)
+    best, f_best, feasible = r_hi, f_hi, f_hi >= fs_target
+    if feasible and not cancelled[0]:
+        r_lo, f_lo = evaluate(lo)
+        if f_lo >= fs_target:
+            best, f_best = r_lo, f_lo
+        else:
+            while hi - lo > tol_rho and not cancelled[0]:
+                mid = 0.5 * (lo + hi)
+                r_mid, f_mid = evaluate(mid)
+                if f_mid >= fs_target:
+                    hi, best, f_best = mid, r_mid, f_mid
+                else:
+                    lo = mid
+
+    rho, u = best["rho_e"], best["u"]
+    mr = best["mean_rho"]
+
+    # --- uniform lattice meeting the same safety factor ---------------
+    def fs_uniform(r):
+        ru = np.full(model.nel, r)
+        uu, _ = model.solve(model.young(ru), u0=u, tol=cg_tol)
+        return fs_min_of(ru, uu), uu
+    fu_hi, u_hi = fs_uniform(rho_max)
+    if fu_hi < fs_target:
+        r_u, u_u, uniform_ok = rho_max, u_hi, False
+    else:
+        a, b, u_u = rho_min, rho_max, u_hi
+        fu_lo, u_lo = fs_uniform(rho_min)
+        if fu_lo >= fs_target:
+            b, u_u = rho_min, u_lo
+        else:
+            while b - a > 0.002:
+                mid = 0.5 * (a + b)
+                f_mid, u_mid = fs_uniform(mid)
+                if f_mid >= fs_target:
+                    b, u_u = mid, u_mid
+                else:
+                    a = mid
+        r_u, uniform_ok = b, True
+    c_u = float(model.f @ u_u)
+
+    res = dict(best)
+    res.update(
+        mode="strength",
+        compliance_uniform=c_u,
+        gain=1.0 - best["compliance"] / c_u if c_u > 0 else 0.0,
+        iterations=step[0], cancelled=cancelled[0],
+        elapsed=time.time() - t0,
+        fs_target=float(fs_target), fs_lattice_min=f_best,
+        feasible=bool(feasible),
+        rho_uniform_equiv=float(r_u), uniform_feasible=uniform_ok,
+        lattice_mass_saving=(1.0 - mr / r_u) if (uniform_ok and feasible)
+        else None,
+        u_uniform=u_u, rho_uniform=np.full(model.nel, r_u),
+    )
+    return res
+
+
 def _max_disp(u):
     if u.size == 0:
         return 0.0

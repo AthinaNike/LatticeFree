@@ -45,6 +45,18 @@ builds the infill with a variable wall thickness following the map.
   (checkbox **Density from topology optimization**). The last map survives a
   FreeCAD restart.
 
+### Two objectives
+- **Max stiffness for a given mass** — you set the mean density (the mass), the
+  solver distributes it where it stiffens the part most.
+- **Min mass for the target safety factor** — you set the safety factor (e.g.
+  2.0), the solver finds the **lightest** lattice that still meets it. It
+  bisects on the mean density, computing the stiffness-optimal map at every
+  step and checking its strength, and also finds the uniform lattice that
+  meets the same safety factor, so the report shows the real mass saved (e.g.
+  "uniform lattice with the same FS: 101 g → mass saved 41 %"). If even the
+  maximum density cannot reach the target, it says so and suggests a thicker
+  shell, a higher maximum density or a stronger material.
+
 ### Materials and strength check
 - **Material library** — PLA, PETG, ABS, ASA, PA12 and *Custom*: Young modulus,
   Poisson ratio, yield and ultimate strength, density. Values are typical for
@@ -78,8 +90,9 @@ builds the infill with a variable wall thickness following the map.
    **Fixed** constraint on the clamped faces and a **Force** and/or
    **Pressure** constraint on the loaded faces. No mesh or solver is needed.
 2. Back in LatticeFree, press **Topology optimization**. Choose component,
-   TPMS, cell (or **Fit cell to target**), printability limits, shell, mean
-   density (= mass) and material. Without FEM constraints you can try the
+   TPMS, cell (or **Fit cell to target**), printability limits, shell,
+   objective (mean density = mass, or minimum mass for a target safety factor)
+   and material. Without FEM constraints you can try the
    built-in demo cantilever.
 3. Read the report view: iterations, stiffness gain and the strength check
    (optimized vs uniform). The density preview appears in the 3D view; the

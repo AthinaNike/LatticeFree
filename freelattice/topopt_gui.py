@@ -448,8 +448,14 @@ class TopOptDialog(QtWidgets.QDialog):
         self.spin_shell = self._dspin(0.0, 20.0, 1.2, " mm", 0.2)
         form.addRow("Outer shell thickness:", self.spin_shell)
 
+        self.combo_obj = QtWidgets.QComboBox()
+        self.combo_obj.addItem("Max stiffness for a given mass", "stiffness")
+        self.combo_obj.addItem("Min mass for the target safety factor",
+                               "strength")
+        form.addRow("Objective:", self.combo_obj)
         self.spin_target = self._dspin(5.0, 70.0, 25.0, " %", 1.0)
-        form.addRow("Mean lattice density (mass):", self.spin_target)
+        self.label_target = QtWidgets.QLabel("Mean lattice density (mass):")
+        form.addRow(self.label_target, self.spin_target)
         self.spin_rmax = self._dspin(10.0, 90.0, engine.RHO_MAX * 100, " %", 1.0)
         form.addRow("Maximum density:", self.spin_rmax)
         self.label_range = QtWidgets.QLabel("")
@@ -555,6 +561,8 @@ class TopOptDialog(QtWidgets.QDialog):
                   self.spin_lines):
             w.valueChanged.connect(self._update)
         self.btn_cell.clicked.connect(self._fit_cell)
+        self.combo_obj.currentIndexChanged.connect(self._update)
+        self.spin_fs.valueChanged.connect(self._update)
         for w in (self.check_auto, self.check_filter):
             w.toggled.connect(self._update)
         self.combo_target.currentIndexChanged.connect(self._update)
@@ -640,6 +648,9 @@ class TopOptDialog(QtWidgets.QDialog):
         f = self.feas()
         return f["rho_min"], f["rho_max"]
 
+    def strength_mode(self):
+        return self.combo_obj.currentData() == "strength"
+
     def _fit_cell(self, *args):
         tp = self.combo_tpms.currentData()
         tgt = self.spin_target.value() / 100.0
@@ -667,8 +678,15 @@ class TopOptDialog(QtWidgets.QDialog):
         elif f.get("points", 0) > topopt.MAX_GENERATOR_POINTS:
             txt += ("\nThe lattice would need too fine a generation grid: "
                     "increase the cell or the minimum wall.")
+        smode = self.strength_mode()
+        self.spin_target.setEnabled(not smode)
+        self.label_target.setEnabled(not smode)
+        if smode:
+            txt += ("\nObjective: the solver searches the LIGHTEST "
+                    "lattice whose safety factor is >= {:.1f} (several "
+                    "optimizations: slower).".format(self.spin_fs.value()))
         tgt_ = self.spin_target.value() / 100.0
-        if f["ok"] and tgt_ - rmin < 0.03:
+        if f["ok"] and not smode and tgt_ - rmin < 0.03:
             txt += ("\nMean density too close to the printable minimum: "
                     "little room to optimize (use 'Fit cell to target').")
             bad = True
@@ -692,7 +710,7 @@ class TopOptDialog(QtWidgets.QDialog):
             nel *= max(2, int(round((bb_max[a] - bb_min[a]) / h)))
         hints = ["Grid: ~{} elements (bounding box).".format(nel)]
         tgt = self.spin_target.value() / 100.0
-        if not rmin <= tgt <= rmax:
+        if not self.strength_mode() and not rmin <= tgt <= rmax:
             hints.append("WARNING: mean density outside the allowed range.")
         if nel > 150000:
             hints.append("Very heavy: increase the element size.")
@@ -739,7 +757,7 @@ class TopOptDialog(QtWidgets.QDialog):
             return
         rmin, rmax = f["rho_min"], f["rho_max"]
         tgt = self.spin_target.value() / 100.0
-        if not rmin <= tgt <= rmax:
+        if not self.strength_mode() and not rmin <= tgt <= rmax:
             QtWidgets.QMessageBox.warning(
                 self, "LatticeFree V2",
                 "The mean density must lie within {:.0f}-{:.0f}%.".format(
@@ -774,6 +792,7 @@ class TopOptDialog(QtWidgets.QDialog):
             build_axis=self.combo_axis.currentData(),
             C2=self.spin_C2.value(), m=self.spin_m.value(),
             fs_target=self.spin_fs.value(),
+            objective=self.combo_obj.currentData(),
             C=self.spin_C.value(), n=self.spin_n.value(),
             h=self.spin_elem.value(), filter_radius=self.spin_filter.value(),
             maxit=self.spin_iter.value(),
@@ -816,8 +835,16 @@ def run(p):
         p["z_factor"], "XYZ"[p["build_axis"]]))
     log("  Strength law:   sigma*/sigma_s = {:.3f} rho^{:.2f}\n".format(
         p["C2"], p["m"]))
-    log("  Density:        mean {:.0f}%, range {:.0f}-{:.0f}%\n".format(
-        p["rho_target"] * 100, p["rho_min"] * 100, p["rho_max"] * 100))
+    smode = p.get("objective") == "strength"
+    if smode:
+        log("  Objective:      MIN MASS with lattice FS >= {:.2f}\n".format(
+            p["fs_target"]))
+        log("  Density:        range {:.0f}-{:.0f}% (mean found by the "
+            "solver)\n".format(p["rho_min"] * 100, p["rho_max"] * 100))
+    else:
+        log("  Objective:      max stiffness for the given mass\n")
+        log("  Density:        mean {:.0f}%, range {:.0f}-{:.0f}%\n".format(
+            p["rho_target"] * 100, p["rho_min"] * 100, p["rho_max"] * 100))
     log("  Printability:   wall >= {:.2f} mm ({} x {:.2f} mm lines), "
         "pores >= {:.1f} mm\n".format(
             p["nozzle"], p["min_lines"], p["line_width"], p["min_pore"]))
@@ -841,8 +868,9 @@ def run(p):
     ftot = model.f.reshape(-1, 3).sum(axis=0)
     log("  Total resultant: ({:.1f}, {:.1f}, {:.1f}) N\n".format(*ftot))
 
+    nsteps = 10 if smode else p["maxit"]
     prog = QtWidgets.QProgressDialog(
-        "Topology optimization...", "Stop", 0, p["maxit"], Gui.getMainWindow())
+        "Topology optimization...", "Stop", 0, nsteps, Gui.getMainWindow())
     prog.setWindowTitle("LatticeFree V2")
     prog.setWindowModality(QtCore.Qt.WindowModal)
     prog.setMinimumDuration(0)
@@ -850,9 +878,13 @@ def run(p):
     QtWidgets.QApplication.processEvents()
 
     def cb(it, c, mr, change):
-        prog.setValue(min(it, p["maxit"]))
-        prog.setLabelText("Iteration {}  |  compliance {:.4g} N*mm  |  "
-                          "change {:.3f}".format(it, c, change))
+        prog.setValue(min(it, nsteps))
+        if smode:
+            prog.setLabelText("Step {}  |  mean density {:.1f}%  |  "
+                              "lattice FS {:.2f}".format(it, mr * 100, change))
+        else:
+            prog.setLabelText("Iteration {}  |  compliance {:.4g} N*mm  |  "
+                              "change {:.3f}".format(it, c, change))
         QtWidgets.QApplication.processEvents()
         return not prog.wasCanceled()
 
@@ -861,9 +893,19 @@ def run(p):
         QtWidgets.QApplication.processEvents()
 
     try:
-        res = topopt.optimize(model, p["rho_target"], p["rho_min"],
-                              p["rho_max"], p["filter_radius"],
-                              maxit=p["maxit"], callback=cb, log=log_flush)
+        if smode:
+            log("Searching the lightest lattice with FS >= {:.2f}:\n".format(
+                p["fs_target"]))
+            res = topopt.size_for_strength(
+                model, p["fs_target"], p["sy"], p["C2"], p["m"],
+                p["rho_min"], p["rho_max"], p["filter_radius"],
+                z_factor=p["z_factor"], build_axis=p["build_axis"],
+                maxit=min(p["maxit"], 40), callback=cb, log=log_flush)
+        else:
+            res = topopt.optimize(model, p["rho_target"], p["rho_min"],
+                                  p["rho_max"], p["filter_radius"],
+                                  maxit=p["maxit"], callback=cb,
+                                  log=log_flush)
     finally:
         prog.close()
 
@@ -887,21 +929,45 @@ def run(p):
 
     rho = res["rho"]
     log(sep + "\n")
-    log("Result{}: {} iterations in {:.0f} s\n".format(
+    log("Result{}: {} {} in {:.0f} s\n".format(
         " (STOPPED)" if res["cancelled"] else "", res["iterations"],
-        res["elapsed"]))
+        "steps" if smode else "iterations", res["elapsed"]))
     log("  Density:        {:.0f}% - {:.0f}%  (mean {:.1f}%)\n".format(
         np.nanmin(rho) * 100, np.nanmax(rho) * 100, res["mean_rho"] * 100))
     log("  Compliance:     {:.4g} N*mm  (uniform lattice {:.4g})\n".format(
         res["compliance"], res["compliance_uniform"]))
-    log("  Stiffness:      +{:.0f}% vs uniform lattice at equal mass\n"
-        .format(100.0 * (res["compliance_uniform"] / res["compliance"] - 1.0)))
+    stiff = 100.0 * (res["compliance_uniform"] / res["compliance"] - 1.0)
+    if smode:
+        log("  Stiffness:      {:+.0f}% vs uniform lattice with the same "
+            "FS\n".format(stiff))
+    else:
+        log("  Stiffness:      +{:.0f}% vs uniform lattice at equal mass\n"
+            .format(stiff))
     log("  Max displacement: {:.4g} mm  (linear estimate, homogenized "
         "lattice)\n".format(res["max_disp"]))
     log("  Mass:           {:.1f} g  (shell + lattice, {:.0f} mm3, voxel "
         "estimate)\n".format(ver["mass_g"], ver["volume_mm3"]))
+    if smode:
+        if not res["feasible"]:
+            App.Console.PrintWarning(
+                "  NOT ACHIEVABLE: even at the maximum density {:.0f}% the "
+                "lattice FS is {:.2f} < {:.2f}. Increase the shell, the "
+                "maximum density or use a stronger material.\n".format(
+                    p["rho_max"] * 100, res["fs_lattice_min"],
+                    p["fs_target"]))
+        elif res["uniform_feasible"]:
+            log("  Uniform lattice with the same FS: density {:.0f}%, "
+                "{:.1f} g  ->  mass saved {:.0f}% ({:.1f} g)\n".format(
+                    res["rho_uniform_equiv"] * 100, ver_u["mass_g"],
+                    100.0 * (1.0 - ver["mass_g"] / ver_u["mass_g"]),
+                    ver_u["mass_g"] - ver["mass_g"]))
+        else:
+            log("  A uniform lattice cannot reach FS {:.2f} within {:.0f}% "
+                "density: only the graded map does.\n".format(
+                    p["fs_target"], p["rho_max"] * 100))
     log("-" * 56 + "\n  STRENGTH CHECK ({})\n".format(p["material"]))
-    log("                      optimized   uniform\n")
+    log("                      optimized   uniform{}\n".format(
+        " (same FS)" if smode else ""))
     log("  FS yield (min)      {:8.2f}   {:8.2f}\n".format(
         ver["fs_yield_min"], ver_u["fs_yield_min"]))
     log("  FS ultimate (min)   {:8.2f}   {:8.2f}\n".format(
@@ -966,15 +1032,24 @@ def run(p):
     doc.recompute()
     Gui.SendMsgToActiveView("ViewFit")
 
+    if smode and res.get("feasible") and res.get("uniform_feasible"):
+        head = ("Lightest lattice with FS >= {:.1f}: {:.0f} g, {:.0f}% "
+                "lighter than a uniform lattice with the same FS.\n".format(
+                    p["fs_target"], ver["mass_g"],
+                    100.0 * (1.0 - ver["mass_g"] / ver_u["mass_g"])))
+    elif smode:
+        head = "Strength sizing done (see the report view).\n"
+    else:
+        head = "Optimization done: +{:.0f}% stiffness at equal mass.\n".format(
+            stiff)
     ans = QtWidgets.QMessageBox.question(
         Gui.getMainWindow(), "LatticeFree V2",
-        "Optimization done: +{:.0f}% stiffness at equal mass.\n"
+        head +
         "Safety factor (yield, {}): {:.2f}  [uniform lattice: {:.2f}]\n"
         "Mass: {:.0f} g\n\n"
         "The safety-factor map is in the 'TopOpt_safety' group "
         "(hidden).\n\n"
         "Open the {} generator with this density map?".format(
-            100.0 * (res["compliance_uniform"] / res["compliance"] - 1.0),
             p["material"], ver["fs_yield_min"], ver_u["fs_yield_min"],
             ver["mass_g"], engine.TPMS[p["tpms"]]["label"]),
         QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
