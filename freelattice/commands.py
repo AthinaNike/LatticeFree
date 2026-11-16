@@ -336,6 +336,24 @@ def generate(cell_size, density, spacing, t_shell, demo_box,
 # DIALOG
 # ======================================================================
 
+def is_valid_solid(obj):
+    """True if obj carries a valid closed solid usable as a component.
+    Never raises: documents often contain objects whose shape is null
+    or invalid (failed PartDesign features, FEM objects, previews), and
+    asking their Volume throws 'shape is invalid'."""
+    try:
+        if not hasattr(obj, "Shape") or obj.isDerivedFrom("Mesh::Feature"):
+            return False
+        if obj.Name.startswith(("TopOpt_density", "TopOpt_safety")):
+            return False
+        sh = obj.Shape
+        if sh.isNull() or not sh.isValid():
+            return False
+        return sh.Volume > 1e-9
+    except Exception:
+        return False
+
+
 class TPMSDialog(QtWidgets.QDialog):
     """Parameter dialog, shared by all TPMS: only the tpms_type changes
     (hence the density/wall calibration), the parameters are identical."""
@@ -356,7 +374,7 @@ class TPMSDialog(QtWidgets.QDialog):
             sel = Gui.Selection.getSelection()
             sel_name = sel[0].Name if sel else None
             for obj in doc.Objects:
-                if hasattr(obj, "Shape") and obj.Shape.Volume > 0:
+                if is_valid_solid(obj):
                     self.combo_target.addItem(obj.Label, obj.Name)
                     if obj.Name == sel_name:
                         self.combo_target.setCurrentIndex(

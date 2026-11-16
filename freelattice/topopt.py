@@ -204,13 +204,18 @@ def make_grid(bb_min, bb_max, h_target):
 
 
 def auto_element_size(bb_min, bb_max, cell_size, max_elements=40000):
-    """Coarsest sensible element: ~cell/2, but at most max_elements
-    over the bounding box (the density varies on the cell scale)."""
+    """Element size: ~cell/2 (the density varies on the cell scale),
+    but at least ~8 elements across the thinnest dimension of the part
+    (thin plates/arms need a few elements through the thickness to bend
+    correctly), and never more than max_elements over the bounding box."""
     V = 1.0
+    dims = []
     for a in range(3):
-        V *= max(bb_max[a] - bb_min[a], 1e-6)
+        d = max(bb_max[a] - bb_min[a], 1e-6)
+        dims.append(d)
+        V *= d
     h_budget = (V / float(max_elements)) ** (1.0 / 3.0)
-    return max(cell_size / 2.0, h_budget)
+    return max(h_budget, min(cell_size / 2.0, min(dims) / 8.0))
 
 
 def centers(axis):

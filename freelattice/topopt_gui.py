@@ -401,20 +401,13 @@ class TopOptDialog(QtWidgets.QDialog):
         if doc:
             sel = Gui.Selection.getSelection()
             sel_name = sel[0].Name if sel else None
+            from .commands import is_valid_solid
             for obj in doc.Objects:
-                if obj.Name.startswith("TopOpt_density"):
-                    continue
-                if hasattr(obj, "Shape") and not obj.isDerivedFrom(
-                        "Mesh::Feature"):
-                    try:
-                        ok = obj.Shape.Volume > 0
-                    except Exception:
-                        ok = False
-                    if ok:
-                        self.combo_target.addItem(obj.Label, obj.Name)
-                        if obj.Name == sel_name:
-                            self.combo_target.setCurrentIndex(
-                                self.combo_target.count() - 1)
+                if is_valid_solid(obj):
+                    self.combo_target.addItem(obj.Label, obj.Name)
+                    if obj.Name == sel_name:
+                        self.combo_target.setCurrentIndex(
+                            self.combo_target.count() - 1)
         form.addRow("Component:", self.combo_target)
 
         self.label_cons = QtWidgets.QLabel("")
