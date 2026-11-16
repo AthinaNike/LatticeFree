@@ -1,4 +1,21 @@
 # -*- coding: utf-8 -*-
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# LatticeFree V2 - TPMS lattice infill generator for FreeCAD
+# Copyright (C) 2026 Veronica Massara
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """LatticeFree workbench — FreeCAD registration.
 
 Uses the 'Workbench' and 'Gui' names that FreeCAD injects into the
@@ -20,8 +37,9 @@ import FreeCAD as App
 class LatticeFreeWorkbench(Workbench):  # noqa: F821  (Workbench iniettato da FreeCAD)
     """Workbench for TPMS lattice infill generation."""
 
-    MenuText = "LatticeFree"
-    ToolTip = "TPMS lattice infill generator (Gyroid, Schwarz P, Diamond)"
+    MenuText = "LatticeFree V2"
+    ToolTip = ("TPMS lattice infill generator (Gyroid, Schwarz P, Diamond) "
+               "with topology optimization and strength check")
 
     def __init__(self):
         # Defensive icon path: an error here must never prevent the
@@ -40,9 +58,17 @@ class LatticeFreeWorkbench(Workbench):  # noqa: F821  (Workbench iniettato da Fr
         try:
             from freelattice import commands  # noqa: F401  (registra i comandi)
             cmds = list(commands.TPMS_COMMANDS)
+            try:
+                from freelattice import topopt_gui  # noqa: F401
+                cmds += list(topopt_gui.TOPOPT_COMMANDS)
+            except Exception:
+                import traceback
+                App.Console.PrintError(
+                    "LatticeFree: topology optimization not available:\n"
+                    + traceback.format_exc() + "\n")
             self.appendToolbar("LatticeFree", cmds)
             self.appendMenu("LatticeFree", cmds)
-            App.Console.PrintMessage("LatticeFree workbench caricato.\n")
+            App.Console.PrintMessage("LatticeFree V2 workbench caricato.\n")
         except Exception:
             import traceback
             App.Console.PrintError(
@@ -50,7 +76,7 @@ class LatticeFreeWorkbench(Workbench):  # noqa: F821  (Workbench iniettato da Fr
                 + traceback.format_exc() + "\n")
 
     def Activated(self):
-        App.Console.PrintMessage("LatticeFree attivo.\n")
+        App.Console.PrintMessage("LatticeFree V2 attivo.\n")
 
     def Deactivated(self):
         pass

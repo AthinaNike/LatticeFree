@@ -1,4 +1,21 @@
 # -*- coding: utf-8 -*-
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# LatticeFree V2 - TPMS lattice infill generator for FreeCAD
+# Copyright (C) 2026 Veronica Massara
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """
 LatticeFree — GUI commands
 ===========================
@@ -23,22 +40,30 @@ except ImportError:
     QtWidgets = QtGui
 
 from . import engine
+from . import topopt
 
 
 def generate(cell_size, density, spacing, t_shell, demo_box,
            target, mode, n_smooth, riduzione, r_blend,
            fem_export, fem_elem, fem_formato,
-           grad_on, grad_core_density, nozzle_mm, tpms=engine.TPMS_DEFAULT):
+           grad_on, grad_core_density, nozzle_mm, tpms=engine.TPMS_DEFAULT,
+           topo_on=False):
     log = App.Console.PrintMessage
     label = engine.TPMS[tpms]["label"]
     thickness = engine.density_to_isovalue(density, tpms)
+    topo = topopt.get_result() if topo_on else None
+    if topo_on and topo is None:
+        raise ValueError("No topology optimization result available: "
+                         "run 'Topology optimization' first.")
+    if topo is not None:
+        grad_on = False          # the density map replaces the grading
 
     # ---------------------------------------------------------------
     #  Generation parameters report
     # ---------------------------------------------------------------
     sep = "=" * 56
     log(sep + "\n")
-    log("  LatticeFree  -  generation parameters\n")
+    log("  LatticeFree V2  -  generation parameters\n")
     log(sep + "\n")
     log("  TPMS:              {}\n".format(label))
     if target is not None:
@@ -51,6 +76,27 @@ def generate(cell_size, density, spacing, t_shell, demo_box,
         "wall {:.2f} mm)\n".format(
             density * 100.0, thickness,
             engine.wall_thickness_mm(thickness, cell_size, tpms)))
+    if topo is not None:
+        rmap = topo["rho"]
+        log("  Density:           TOPOLOGY OPTIMIZATION map "
+            "({:.0f}-{:.0f}%, mean {:.0f}%)\n".format(
+                np.nanmin(rmap) * 100, np.nanmax(rmap) * 100,
+                topo["mean_rho"] * 100))
+        _warn = App.Console.PrintWarning
+        if topo.get("tpms") and topo["tpms"] != tpms:
+            _warn("  NOTE: map optimized for {}, generating {}.\n".format(
+                engine.TPMS[topo["tpms"]]["label"], label))
+        if topo.get("cell_size") and abs(topo["cell_size"] - cell_size) > 1e-6:
+            _warn("  NOTE: map optimized with cell {:.1f} mm, generating "
+                  "with {:.1f} mm.\n".format(topo["cell_size"], cell_size))
+        if topo.get("t_shell") is not None and \
+                abs(topo["t_shell"] - t_shell) > 1e-6:
+            _warn("  NOTE: map optimized with shell {:.2f} mm, generating "
+                  "with {:.2f} mm.\n".format(topo["t_shell"], t_shell))
+        tname = target.Name if target is not None else None
+        if topo.get("target") and topo["target"] != tname:
+            _warn("  NOTE: map computed on '{}', generating on '{}'.\n"
+                  .format(topo["target"], tname or "demo cube"))
     if grad_on:
         log("  Grading:           ON  ({:.0f}% skin -> {:.0f}% core, "
             "nozzle {:.2f} mm)\n".format(
@@ -64,6 +110,8 @@ def generate(cell_size, density, spacing, t_shell, demo_box,
     # thinnest wall actually present (grading included): it dictates
     # the minimum resolution (>= ~3 elements per wall)
     rho_thinnest = min(density, grad_core_density) if grad_on else density
+    if topo is not None:
+        rho_thinnest = float(np.nanmin(topo["rho"]))
     w_min = engine.wall_thickness_mm(
         engine.density_to_isovalue(rho_thinnest, tpms), cell_size, tpms)
     el_per_wall = (w_min / spacing) if spacing > 0 else 0.0
@@ -126,8 +174,21 @@ def generate(cell_size, density, spacing, t_shell, demo_box,
     log("{} field and combination...\n".format(label))
     X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
 
-    # --- thickness field: constant or graded (dense outside) ---
-    if grad_on:
+    # --- thickness field: optimized map, graded or constant ---
+    if topo is not None:
+        rho_f = topopt.sample_density_axes(topo, x, y, z)
+        cal = engine.TPMS[tpms]
+        t_field = np.interp(rho_f, cal["cal_rho"],
+                            cal["cal_t"]).astype(np.float32)
+        log("Optimized density map: {:.0f}-{:.0f}%, wall thickness "
+            "{:.2f}-{:.2f} mm\n".format(
+                float(rho_f.min()) * 100, float(rho_f.max()) * 100,
+                engine.wall_thickness_mm(float(t_field.min()), cell_size, tpms),
+                engine.wall_thickness_mm(float(t_field.max()), cell_size, tpms)))
+        del rho_f
+        gy = engine.tpms_field(X, Y, Z, cell_size, t_field, tpms)
+        del t_field
+    elif grad_on:
         # core density clamped to the printable minimum for this cell
         rho_min = engine.min_printable_density(cell_size, nozzle_mm, tpms)
         rho_int = max(grad_core_density, rho_min, engine.RHO_MIN)
@@ -207,7 +268,8 @@ def generate(cell_size, density, spacing, t_shell, demo_box,
             App.Console.PrintWarning(
                 "Decimation not available: {}\n".format(e))
 
-    obj_name = "{}_ShellInfill".format(label.replace(" ", ""))
+    obj_name = "{}_ShellInfill{}".format(label.replace(" ", ""),
+                                        "_TopOpt" if topo is not None else "")
     if mode == "mesh":
         mobj = doc.addObject("Mesh::Feature", obj_name)
         mobj.Mesh = m
@@ -278,11 +340,12 @@ class TPMSDialog(QtWidgets.QDialog):
     """Parameter dialog, shared by all TPMS: only the tpms_type changes
     (hence the density/wall calibration), the parameters are identical."""
 
-    def __init__(self, tpms_type=engine.TPMS_DEFAULT):
+    def __init__(self, tpms_type=engine.TPMS_DEFAULT, preset=None):
         super(TPMSDialog, self).__init__(Gui.getMainWindow())
+        preset = preset or {}
         self.tpms_type = tpms_type
         self.label = engine.TPMS[tpms_type]["label"]
-        self.setWindowTitle("LatticeFree — {}".format(self.label))
+        self.setWindowTitle("LatticeFree V2 — {}".format(self.label))
         self.setMinimumWidth(420)
         form = QtWidgets.QFormLayout(self)
 
@@ -363,6 +426,40 @@ class TPMSDialog(QtWidgets.QDialog):
             self._update_grading()
             self._auto_element()   # la parete min cambia col grading
         self.check_grad.toggled.connect(_toggle_grad)
+
+        # --- Density from topology optimization ---------------------
+        self.check_topo = QtWidgets.QCheckBox(
+            "Density from topology optimization (variable map)")
+        form.addRow(self.check_topo)
+        self.label_topo = QtWidgets.QLabel("")
+        self.label_topo.setWordWrap(True)
+        self.label_topo.setStyleSheet("color: gray;")
+        form.addRow("", self.label_topo)
+        res = topopt.get_result()
+        if res is None:
+            self.check_topo.setEnabled(False)
+            self.label_topo.setText(
+                "No map available: run 'Topology optimization' first.")
+        else:
+            rr = res["rho"]
+            self.label_topo.setText(
+                "Map: '{}', {}, cell {:.1f} mm, density {:.0f}-{:.0f}% "
+                "(mean {:.0f}%), +{:.0f}% stiffness vs uniform.".format(
+                    res.get("target", "?"),
+                    engine.TPMS.get(res.get("tpms", ""), {}).get("label", "?"),
+                    float(res.get("cell_size", 0)),
+                    np.nanmin(rr) * 100, np.nanmax(rr) * 100,
+                    float(res["mean_rho"]) * 100,
+                    100.0 * (float(res["compliance_uniform"]) /
+                             max(float(res["compliance"]), 1e-30) - 1.0)))
+
+        def _toggle_topo(on):
+            if on:
+                self.check_grad.setChecked(False)
+            self.check_grad.setEnabled(not on)
+            self.spin_dens.setEnabled(not on)
+            self._auto_element()
+        self.check_topo.toggled.connect(_toggle_topo)
 
         self.spin_blend = QtWidgets.QDoubleSpinBox()
         self.spin_blend.setRange(0.0, 10.0)
@@ -461,6 +558,20 @@ class TPMSDialog(QtWidgets.QDialog):
         self._update_grading()
         self._update_estimate()
 
+        # --- preset (e.g. coming from the topology optimization) ------
+        if preset.get("target"):
+            i = self.combo_target.findData(preset["target"])
+            if i >= 0:
+                self.combo_target.setCurrentIndex(i)
+        if preset.get("cell_size"):
+            self.spin_cell.setValue(preset["cell_size"])
+        if preset.get("t_shell") is not None:
+            self.spin_shell.setValue(preset["t_shell"])
+        if preset.get("nozzle"):
+            self.spin_nozzle.setValue(preset["nozzle"])
+        if preset.get("topo") and self.check_topo.isEnabled():
+            self.check_topo.setChecked(True)
+
         buttons = QtWidgets.QDialogButtonBox()
         buttons.addButton("Generate", QtWidgets.QDialogButtonBox.AcceptRole)
         buttons.addButton(QtWidgets.QDialogButtonBox.Cancel)
@@ -500,6 +611,11 @@ class TPMSDialog(QtWidgets.QDialog):
 
     def _thinnest_rho(self):
         """Density of the thinnest wall actually present."""
+        if getattr(self, "check_topo", None) is not None and \
+                self.check_topo.isChecked():
+            res = topopt.get_result()
+            if res is not None:
+                return float(np.nanmin(res["rho"]))
         rho = self.spin_dens.value() / 100.0
         if self.check_grad.isChecked():
             rho = min(rho, self.spin_dens_int.value() / 100.0)
@@ -509,7 +625,13 @@ class TPMSDialog(QtWidgets.QDialog):
         if self.check_auto.isChecked():
             val = engine.recommended_spacing(
                 self.spin_cell.value(), self._thinnest_rho(), self.tpms_type)
-            self.spin_elem.setValue(round(val, 2))
+            # stay within the point budget: never propose a grid that
+            # cannot be generated (the estimate then warns if the
+            # thinnest wall gets under-sampled)
+            bb_min, bb_max = self._current_bb()
+            while engine.estimate_points(bb_min, bb_max, val) > 25e6:
+                val *= 1.05
+            self.spin_elem.setValue(round(val + 0.004, 2))
         self._update_estimate()
 
     def _current_bb(self):
@@ -594,6 +716,7 @@ class TPMSDialog(QtWidgets.QDialog):
             grad_core_density=self.spin_dens_int.value() / 100.0,
             nozzle_mm=self.spin_nozzle.value(),
             tpms=self.tpms_type,
+            topo_on=self.check_topo.isChecked(),
         )
 
 

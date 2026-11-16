@@ -1,10 +1,15 @@
-# LatticeFree
+# LatticeFree V2
 
 **A free TPMS lattice-infill generator for FreeCAD.** Fill any solid with a
 **Gyroid**, **Schwarz P**, or **Diamond** lattice using implicit modelling:
 outer shell, smooth fillet at the shell/lattice junction, relative-density
 control, density grading (dense skin, light core), and FEM mid-surface export.
 No CAD booleans, no mandatory external dependencies.
+
+**New in V2:** the lattice density can come from a **topology optimization**
+driven by the loads and constraints of the FEM workbench, with a **material
+library**, a **strength check** (safety factor to yield and ultimate, interlayer
+check) and **printability limits** built in.
 
 Under the hood it runs a fully implicit pipeline — the signed distance field of
 the part is combined with the TPMS field via `min`/`max`/smooth-max operations,
@@ -14,6 +19,75 @@ apart.
 
 > Icon and screenshots go in `Resources/` — drop a render of a graded gyroid
 > cube here to make the repo landing page speak for itself.
+
+---
+
+## What's new in V2
+
+### Topology optimization — variable lattice density
+A new toolbar button, **Topology optimization**, computes the optimal relative
+density map of the lattice (maximum stiffness for a given mass) from loads and
+constraints defined in the **FEM workbench** (Analysis + `Fixed`, `Force`,
+`Pressure` on faces, edges or vertices), then hands it to the generator, which
+builds the infill with a variable wall thickness following the map.
+
+- **Lattice-aware material model.** Stiffness follows the homogenized
+  Gibson–Ashby law of the TPMS, `E*/Es = C·ρ^n` (gyroid: C = 0.414, n = 1.386,
+  from A. Mastrofini, *Gyroid mechanics*, 2022 — shell FEA of a cubic cell,
+  fitted on 6–32 %). Intermediate densities *are* the lattice, so there is no
+  SIMP penalization towards solid/void.
+- **Density filter** with radius = TPMS cell: the density cannot vary faster
+  than one cell. The outer shell is counted as solid material.
+- **Pure numpy**: matrix-free PCG on 8-node hexahedra, Optimality Criteria
+  update. No new dependency; typical runs take seconds to a few minutes.
+- **Output:** 3D preview of the map in density bands, `.npz` map and `.vtk`
+  file (ParaView) next to the document, and direct hand-off to the generator
+  (checkbox **Density from topology optimization**). The last map survives a
+  FreeCAD restart.
+
+### Materials and strength check
+- **Material library** — PLA, PETG, ABS, ASA, PA12 and *Custom*: Young modulus,
+  Poisson ratio, yield and ultimate strength, density. Values are typical for
+  printed parts (XY): enter your filament datasheet.
+- **Strength verification** after the optimization, for both the optimized and
+  a uniform lattice of the same mass:
+  - lattice strength from `σ*/σs = C2·ρ^m` (default C2 = 0.30, m = 1.5,
+    Gibson–Ashby, indicative and editable);
+  - solid shell checked with the full material strength;
+  - in-plane check with von Mises, **interlayer check** with the tensile stress
+    along the build axis against `factor × σs` (FDM: 0.3–0.7);
+  - safety factor to yield and to ultimate, critical point, yield-load
+    estimate, mass in grams;
+  - safety-factor map in the `TopOpt_safety` group (red = yields) and in the
+    `.vtk` file.
+
+### Printability limits
+- **Minimum wall** = extrusion width × number of lines (default 2 × 0.45 mm)
+  → minimum density for the chosen cell.
+- **Minimum pore diameter** (default 1.5 mm) → maximum density, from measured
+  pore tables (largest inscribed sphere in the void) for each TPMS.
+- **Generation grid check**: the thinnest wall must be resolvable within the
+  point budget, otherwise the optimization does not start.
+- Light lattices need larger cells: **Fit cell to target** picks the smallest
+  cell that leaves room to optimize. With 0.9 mm walls the gyroid's minimum
+  density is about 28 % at a 10 mm cell, 19 % at 15 mm, 14 % at 20 mm.
+- The generator's *auto* grid element now stays within a 25 M point budget.
+
+### Topology optimization — quick guide
+1. Open your part. In the **FEM** workbench create an **Analysis**, add a
+   **Fixed** constraint on the clamped faces and a **Force** and/or
+   **Pressure** constraint on the loaded faces. No mesh or solver is needed.
+2. Back in LatticeFree, press **Topology optimization**. Choose component,
+   TPMS, cell (or **Fit cell to target**), printability limits, shell, mean
+   density (= mass) and material. Without FEM constraints you can try the
+   built-in demo cantilever.
+3. Read the report view: iterations, stiffness gain and the strength check
+   (optimized vs uniform). The density preview appears in the 3D view; the
+   safety-factor map is in the hidden `TopOpt_safety` group.
+4. Answer **Yes** to open the generator with the map already enabled, or later
+   tick **Density from topology optimization** in any TPMS dialog. Keep cell
+   size and shell the same as in the optimization (the report warns if they
+   differ).
 
 ---
 
@@ -93,8 +167,8 @@ of confusion: if the grid is too coarse relative to the thinnest wall, you get
 **hexagonal holes** — walls under-sampled by construction, *not* a design flaw.
 The generation report prints the cell/element ratio and warns whenever the
 thinnest wall drops below 2 grid elements. Grid cost grows with the **cube** of
-resolution, so very fine grids eat RAM fast; the dialog blocks configurations
-above ~40 M points.
+resolution, so very fine grids eat RAM fast: *auto* stays within a 25 M point
+budget and the dialog blocks configurations above ~40 M points.
 
 ### Output — mesh vs solid CAD
 `mesh` is fast and is what you want for printing. `solid CAD` converts the mesh to
@@ -138,7 +212,8 @@ restart FreeCAD, then pick **LatticeFree** in the workbench selector.
 1. (Optional) Select a solid in the document — the lattice is confined to its
    volume. With no selection, a demo cube is produced.
 2. Click the button for the TPMS you want: **Genera infill Giroide**,
-   **Schwarz P**, or **Diamond**.
+   **Schwarz P**, or **Diamond** — or start from **Topology optimization**
+   (see *What's new in V2*) to get a variable-density map first.
 3. Set the parameters in the dialog (see above) and generate. A parameter report
    and progress are printed in the report view.
 
@@ -155,8 +230,12 @@ export.
 
 **Out of scope (research-grade):**
 - Automatic FEM-grade remeshing of the TPMS (remesh in your solver instead).
-- Grading from an external optimization density map (e.g. topology-optimization
-  output).
+- Stress-driven sizing: the optimizer maximizes stiffness and the strength is
+  checked afterwards, not imposed. The check is linear and homogenized: wall
+  buckling, fatigue and local stress concentrations inside a cell are not
+  covered. Verify critical parts in a solver and by testing.
+- Stiffness laws for Schwarz P and Diamond are provisional (gyroid values):
+  enter measured C, n in the dialog when available.
 - Further TPMS (double gyroid, I-WP, Neovius…) — the engine has a TPMS registry,
   so adding one is a dictionary entry plus a command; planned.
 
@@ -165,12 +244,22 @@ export.
 ## License
 
 GNU General Public License v3.0 — see the [`LICENSE`](LICENSE) file for the full
-text. FreeCAD itself is LGPL, which imposes no obstacle to distributing a GPLv3
-workbench that runs on top of it.
+text (GPL-3.0-or-later, Copyright (C) 2026 Veronica Massara). FreeCAD itself is
+LGPL, which imposes no obstacle to distributing a GPLv3 workbench that runs on
+top of it.
+
+The software is provided **without any warranty** (GPL sections 15–16): safety
+factors and strength checks are engineering estimates and do not replace the
+verification of the final part by testing.
 
 ## Maintainer
 
 Veronica Massara.
+
+## Author's note
+
+** Note by Veronica Massara **
+This workbench has been created as a follow up of my Master Degree Thesis. The code was made with Claude Opus and Fable5. I'm not a professional programmer, this workbench was created as an engineering need to create parts and components with a parametric TPMS infill
 
 
 
@@ -256,11 +345,6 @@ This workbench installs the classic way: `Mod/LatticeFree/InitGui.py`.
 On FreeCAD 1.1 an active `package.xml` makes the loader treat the addon as a
 "package-format" module and look for a namespaced `freecad/<name>/init_gui.py`
 layout — which this addon does not use — so the classic `InitGui.py` scan gets
-
-
-** Note by Veronica Massara **
-This workbench has been created as a follow up of my Master Degree Thesis. The code was made with Claude Opus and Fable5. I'm not a professional programmer, this workbench was created as an engineering need to create parts and components with a parametric TPMS infill
-
 bypassed and the workbench silently fails to appear at startup. For that reason
 the metadata file ships here as `package.xml.bak` (inactive). Do not rename it
 back to `package.xml` unless you also convert the addon to the namespaced layout.

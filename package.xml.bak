@@ -3,12 +3,13 @@
   <name>LatticeFree</name>
   <description>TPMS lattice infill generator (Gyroid, Schwarz P,
     Diamond): shell, fillet, relative density control, density grading,
-    FEM mid-surface export. Implicit modelling, no CAD booleans.</description>
-  <version>1.1.0</version>
-  <date>2026-07-06</date>
+    FEM mid-surface export, topology optimization of the lattice density
+    with material library and strength check. Implicit modelling, no CAD booleans.</description>
+  <version>2.0.0</version>
+  <date>2026-11-16</date>
   <maintainer email="vera.massara@gmail.com">Veronica Massara</maintainer>
-  <license file="LICENSE">LGPL-2.1-or-later</license>
-  <url type="repository" branch="main">https://github.com/AthinaNike/LatticeFree</url>
+  <license file="LICENSE">GPL-3.0-or-later</license>
+  <url type="repository" branch="LatticeFree---FreeCAD-workbench">https://github.com/AthinaNike/LatticeFree</url>
   <icon>Resources/icons/freelattice.svg</icon>
   <content>
     <workbench>
