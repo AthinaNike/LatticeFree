@@ -171,6 +171,39 @@ def generate(cell_size, density, spacing, t_shell, demo_box,
         sdf = engine.sdf_box_demo(Xg, Yg, Zg, demo_box)
         del Xg, Yg, Zg
 
+    # --- topology optimization: stage-1 shape and solid zones ---------
+    keepF = None
+    if topo is not None:
+        sdf_part = sdf
+        if topo.get("shape") is not None:
+            log("Stage-1 shape: trimming the part to the optimized "
+                "shape...\n")
+            xs = topopt.sample_grid_axes(topo, "shape", x, y, z, fill=0.0)
+            sdf = np.minimum(sdf, topopt.shape_distance(xs, spacing)).astype(
+                np.float32)
+            del xs
+        ring = float(topo.get("keep_ring", 0) or 0)
+        if topo.get("keep_P") is not None and ring > 0:
+            kpts, _, _ = topopt.sample_triangles(topo["keep_P"],
+                                                 topo["keep_T"],
+                                                 0.7 * spacing)
+            o = np.array([x[0], y[0], z[0]], dtype=np.float64)
+            dd = np.array([x[1] - x[0], y[1] - y[0], z[1] - z[0]],
+                          dtype=np.float64)
+            nn = np.array([len(x), len(y), len(z)])
+            ijk = np.rint((kpts - o) / dd).astype(int)
+            ijk = ijk[np.all((ijk >= 0) & (ijk < nn), axis=1)]
+            seed = np.zeros(tuple(nn), bool)
+            seed[ijk[:, 0], ijk[:, 1], ijk[:, 2]] = True
+            dist = topopt.distance_to_seeds(seed, float(dd.mean()),
+                                            ring + 3 * spacing)
+            # solid within `ring` of the connection faces, inside the part
+            keepF = np.minimum(ring - dist, sdf_part).astype(np.float32)
+            del dist, seed, kpts
+            log("Solid zones: {:.1f} mm around the load/constraint faces "
+                "(no lattice)\n".format(ring))
+        del sdf_part
+
     log("{} field and combination...\n".format(label))
     X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
 
@@ -220,6 +253,9 @@ def generate(cell_size, density, spacing, t_shell, demo_box,
     del X, Y, Z
     F_field = engine.final_field(sdf, gy, t_shell, r_blend)
     del sdf, gy
+    if keepF is not None:
+        F_field = engine.smooth_max(F_field, keepF, r_blend)
+        del keepF
     F_field += np.float32(1.0e-4) * spacing
 
     log("Marching tetrahedra...\n")
@@ -257,6 +293,28 @@ def generate(cell_size, density, spacing, t_shell, demo_box,
         except Exception:
             App.Console.PrintWarning("fillupHoles failed.\n")
     m.harmonizeNormals()
+
+    # --- mass check vs the optimization prediction --------------------
+    if topo is not None and topo.get("volume_pred_mm3"):
+        try:
+            vol = float(m.Volume)
+            pred = float(topo["volume_pred_mm3"])
+            dens = float(topo.get("dens", 0) or 0)
+            diff = 100.0 * (vol / pred - 1.0)
+            log("Mass check: generated {:.0f} mm3{}  vs  predicted {:.0f} "
+                "mm3{}  ({:+.1f}%)\n".format(
+                    vol, " = {:.1f} g".format(vol / 1000.0 * dens)
+                    if dens else "",
+                    pred, " = {:.1f} g".format(pred / 1000.0 * dens)
+                    if dens else "", diff))
+            if abs(diff) > 15.0:
+                App.Console.PrintWarning(
+                    "  The generated part differs by more than 15% from the "
+                    "optimization model: the lattice is coarse with respect "
+                    "to the part, or cell/shell differ from the "
+                    "optimization.\n")
+        except Exception:
+            pass
 
     if riduzione > 0:
         try:

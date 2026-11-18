@@ -45,9 +45,30 @@ builds the infill with a variable wall thickness following the map.
   (checkbox **Density from topology optimization**). The last map survives a
   FreeCAD restart.
 
-### Two objectives
+### Two-stage optimization and solid connections
+- **Stage 1 — outer shape** (optional): a solid/void SIMP optimization with
+  Heaviside projection finds the shape of the component inside the part and
+  removes the volume that does not carry load (you choose the volume kept, e.g.
+  40 %). Members are at least one TPMS cell wide, so the lattice always fits.
+  The generator then builds shell + graded gyroid **inside that shape**: no CAD
+  rework needed. The report shows how much stiffness the shape keeps.
+- **Solid zones around connections** (on by default): around every face used
+  by a FEM constraint (Fixed, Force, Pressure) — bolt holes, bearing seats,
+  load pads — the part stays **solid, without lattice**, for a chosen ring
+  thickness (default 3 mm). A lattice under a bolt head would crush.
+- **Cell-fit check**: warns when the local thickness of the part is below one
+  cell (few cells → less stiffness than predicted).
+- **Mass check after generation**: the generated mesh volume is compared with
+  the optimization prediction.
+- Method after M. Giacalone, PhD thesis, University of Modena and Reggio
+  Emilia, 2023 (two-stage TO with thin wall and graded gyroid).
+
+### Three objectives
 - **Max stiffness for a given mass** — you set the mean density (the mass), the
   solver distributes it where it stiffens the part most.
+- **Min mass for a required stiffness** — you set the stiffness under the
+  applied load (N/mm); the solver finds the lightest lattice that reaches it,
+  and compares it with the uniform lattice of the same stiffness.
 - **Min mass for the target safety factor** — you set the safety factor (e.g.
   2.0), the solver finds the **lightest** lattice that still meets it. It
   bisects on the mean density, computing the stiffness-optimal map at every

@@ -712,7 +712,7 @@ def size_for_strength(model, fs_target, sy, C2, m, rho_min, rho_max,
             cancelled[0] = True
         return r, f
 
-    lo = min(rho_max, rho_min + 0.01)
+    lo = rho_min
     hi = rho_max - 1e-4
     r_hi, f_hi = evaluate(hi)
     best, f_best, feasible = r_hi, f_hi, f_hi >= fs_target
@@ -771,6 +771,304 @@ def size_for_strength(model, fs_target, sy, C2, m, rho_min, rho_max,
         u_uniform=u_u, rho_uniform=np.full(model.nel, r_u),
     )
     return res
+
+
+# ======================================================================
+# STIFFNESS-DRIVEN SIZING (minimum mass for a required stiffness)
+# ======================================================================
+
+def load_stiffness(model, u):
+    """Stiffness seen by the applied load [N/mm]: resultant force over
+    the work-conjugate displacement, k = F_res^2 / (f.u). For a load
+    spread on a face along one direction this is F / (mean displacement
+    of the face along the load)."""
+    F = model.f.reshape(-1, 3).sum(axis=0)
+    F_res = float(np.linalg.norm(F))
+    work = float(model.f @ u)
+    if F_res <= 0.0 or work <= 0.0:
+        return 0.0, F_res
+    return F_res * F_res / work, F_res
+
+
+def size_for_stiffness(model, k_target, rho_min, rho_max, filter_radius,
+                       maxit=40, tol_rho=0.01, cg_tol=1e-6, callback=None,
+                       log=None):
+    """Minimum lattice mass such that the stiffness under the applied
+    load is >= k_target [N/mm] (bisection on the mean density with the
+    stiffness-optimal map at every step). Also returns the uniform
+    lattice density giving the same stiffness."""
+    log = log or (lambda s: None)
+    t0 = time.time()
+    model.check()
+    quiet = lambda s: None
+    step = [0]
+    cancelled = [False]
+
+    def evaluate(mean):
+        step[0] += 1
+        r = optimize(model, mean, rho_min, rho_max, filter_radius,
+                     maxit=maxit, cg_tol=cg_tol, log=quiet)
+        k, _ = load_stiffness(model, r["u"])
+        log("  step {:2d}: mean density {:.1f}%  ->  stiffness {:.4g} N/mm"
+            "  ({} it.)\n".format(step[0], mean * 100, k, r["iterations"]))
+        if callback is not None and callback(step[0], r["compliance"],
+                                             mean, k) is False:
+            cancelled[0] = True
+        return r, k
+
+    lo = rho_min
+    hi = rho_max - 1e-4
+    r_hi, k_hi = evaluate(hi)
+    best, k_best, feasible = r_hi, k_hi, k_hi >= k_target
+    if feasible and not cancelled[0]:
+        r_lo, k_lo = evaluate(lo)
+        if k_lo >= k_target:
+            best, k_best = r_lo, k_lo
+        else:
+            while hi - lo > tol_rho and not cancelled[0]:
+                mid = 0.5 * (lo + hi)
+                r_mid, k_mid = evaluate(mid)
+                if k_mid >= k_target:
+                    hi, best, k_best = mid, r_mid, k_mid
+                else:
+                    lo = mid
+    u = best["u"]
+    mr = best["mean_rho"]
+
+    def k_uniform(r):
+        ru = np.full(model.nel, r)
+        uu, _ = model.solve(model.young(ru), u0=u, tol=cg_tol)
+        return load_stiffness(model, uu)[0], uu
+    ku_hi, u_hi = k_uniform(rho_max)
+    if ku_hi < k_target:
+        r_u, u_u, uniform_ok = rho_max, u_hi, False
+    else:
+        a, b, u_u = rho_min, rho_max, u_hi
+        ku_lo, u_lo = k_uniform(rho_min)
+        if ku_lo >= k_target:
+            b, u_u = rho_min, u_lo
+        else:
+            while b - a > 0.002:
+                mid = 0.5 * (a + b)
+                k_mid, u_mid = k_uniform(mid)
+                if k_mid >= k_target:
+                    b, u_u = mid, u_mid
+                else:
+                    a = mid
+        r_u, uniform_ok = b, True
+    c_u = float(model.f @ u_u)
+    res = dict(best)
+    res.update(
+        mode="stiffness",
+        compliance_uniform=c_u,
+        gain=1.0 - best["compliance"] / c_u if c_u > 0 else 0.0,
+        iterations=step[0], cancelled=cancelled[0],
+        elapsed=time.time() - t0,
+        k_target=float(k_target), k_found=float(k_best),
+        feasible=bool(feasible),
+        rho_uniform_equiv=float(r_u), uniform_feasible=uniform_ok,
+        lattice_mass_saving=(1.0 - mr / r_u) if (uniform_ok and feasible)
+        else None,
+        u_uniform=u_u, rho_uniform=np.full(model.nel, r_u),
+    )
+    return res
+
+
+# ======================================================================
+# STAGE 1: OUTER SHAPE (solid/void SIMP) AND SOLID "KEEP" ZONES
+# ======================================================================
+
+def _heaviside(xt, beta, eta=0.5):
+    tb = np.tanh(beta * eta)
+    den = tb + np.tanh(beta * (1.0 - eta))
+    xb = (tb + np.tanh(beta * (xt - eta))) / den
+    dxb = beta * (1.0 - np.tanh(beta * (xt - eta)) ** 2) / den
+    return xb, dxb
+
+
+def simp_shape(model, volfrac, filter_radius, keep=None, penal=3.0,
+               emin=1e-2, maxit=150, move=0.2, tol_change=0.01,
+               cg_tol=1e-4, beta_max=16.0, callback=None, log=None):
+    """SIMP (solid/void) on the voxel model with density filter and
+    Heaviside projection (beta continuation 1 -> beta_max): minimum
+    compliance with volume fraction volfrac of the part. Elements in
+    `keep` (bool per active element) are solid and outside the design.
+    Returns the projected physical density per element (~0/1) and the
+    number of iterations.
+
+    Stage 1 of the two-stage method (Giacalone 2023, ch. 4): it finds
+    the outer shape of the component and removes the volume that does
+    not carry load; the lattice is then graded inside that shape. The
+    projection drives the result to crisp solid/void, so that the 0.5
+    level used as outer surface does not cut grey load paths. The
+    filter radius sets the minimum member size."""
+    log = log or (lambda s: None)
+    model.check()
+    keep = np.zeros(model.nel, bool) if keep is None else np.asarray(keep)
+    design = ~keep
+    filt = DensityFilter(model, filter_radius)
+    Es = model.Es
+    beta = 1.0
+
+    def phys(xd):
+        xt = filt.forward(xd)
+        xb, dxb = _heaviside(xt, beta)
+        return np.where(keep, 1.0, xb), np.where(keep, 0.0, dxb)
+
+    x = np.where(keep, 1.0, volfrac)
+    xp, dxb = phys(x)
+    u = None
+    it = 0
+    hist = []
+    since = 0
+    for it in range(1, maxit + 1):
+        E = Es * (emin + (1.0 - emin) * xp ** penal)
+        u, its = model.solve(E, u0=u, tol=cg_tol)
+        c = float(model.f @ u)
+        dc = -penal * (1.0 - emin) * Es * xp ** (penal - 1.0) * \
+            model.element_energy(u)
+        dc = np.minimum(filt.backward(dc * dxb), -1e-30)
+        dv = np.maximum(filt.backward(dxb / float(model.nel)), 1e-30)
+        l1, l2 = 0.0, 1e15
+        lo = np.maximum(0.0, x - move)
+        hi = np.minimum(1.0, x + move)
+        B = -dc / dv
+        xnew = x
+        for _ in range(200):
+            lmid = 0.5 * (l1 + l2)
+            xnew = np.where(keep, 1.0,
+                            np.clip(x * np.sqrt(B / lmid), lo, hi))
+            if phys(xnew)[0].mean() > volfrac:
+                l1 = lmid
+            else:
+                l2 = lmid
+            if (l2 - l1) <= 1e-6 * (l1 + l2):
+                break
+        change = float(np.max(np.abs(xnew - x)[design])) if design.any() \
+            else 0.0
+        x = xnew
+        xp, dxb = phys(x)
+        grey = float(np.mean(4.0 * xp * (1.0 - xp)))
+        log("  shape it {:3d}  compliance {:.4g}  volume {:.1f}%  beta "
+            "{:.0f}  grey {:.2f}  change {:.3f}  (CG {} it.)\n".format(
+                it, c, 100 * xp.mean(), beta, grey, change, its))
+        if callback is not None and callback(it, c, float(xp.mean()),
+                                             change) is False:
+            break
+        hist.append(c)
+        since += 1
+        stalled = len(hist) >= 6 and (max(hist[-6:]) - min(hist[-6:])) < \
+            2e-3 * hist[-1]
+        if (change < tol_change or stalled or since >= 25) and since >= 5:
+            if beta >= beta_max:
+                break
+            beta = min(2.0 * beta, beta_max)
+            xp, dxb = phys(x)
+            since = 0
+            hist = []
+    return xp, it
+
+
+def shape_size_check(bb_min, bb_max, member):
+    """The shape stage needs room for members of size `member`: returns
+    the ratio (smallest part dimension / member size)."""
+    dmin = min(bb_max[a] - bb_min[a] for a in range(3))
+    return dmin / max(member, 1e-9)
+
+
+def grid_from_elements(model, values, fill=np.nan):
+    g = np.full(model.active.shape, fill, dtype=np.float64)
+    g[model.active] = values
+    return g
+
+
+def keep_mask_from_points(model, pts, ring):
+    """Active elements within ~ring [mm] of the given surface points
+    (element containing each point, dilated by round(ring/h) layers)."""
+    if pts is None or len(pts) == 0:
+        return np.zeros(model.nel, bool)
+    o = np.array([model.xn[0], model.yn[0], model.zn[0]])
+    h = np.array([model.hx, model.hy, model.hz])
+    nmax = np.array(model.active.shape) - 1
+    ijk = np.clip(np.floor((np.asarray(pts) - o) / h).astype(int), 0, nmax)
+    seed = np.zeros(model.active.shape, bool)
+    seed[ijk[:, 0], ijk[:, 1], ijk[:, 2]] = True
+    k = int(round(ring / float(h.min())))
+    for _ in range(k):
+        d = seed.copy()
+        for ax in range(3):
+            d |= _shift(seed.astype(np.float64), 1, ax) > 0
+            d |= _shift(seed.astype(np.float64), -1, ax) > 0
+        seed = d
+    return (seed & model.active)[model.active]
+
+
+def distance_to_seeds(seed, spacing, cap):
+    """Distance [mm] from each voxel to the nearest seed voxel (exact
+    EDT with scipy, else 6-neighbour dilation up to `cap`)."""
+    try:
+        from scipy import ndimage as ndi
+        return ndi.distance_transform_edt(~seed, sampling=spacing).astype(
+            np.float32)
+    except ImportError:
+        K = int(np.ceil(cap / spacing)) + 1
+        d = np.full(seed.shape, (K + 1) * spacing, dtype=np.float32)
+        d[seed] = 0.0
+        reached = seed.copy()
+        for k in range(1, K + 1):
+            r = reached.copy()
+            r[1:] |= reached[:-1]; r[:-1] |= reached[1:]
+            r[:, 1:] |= reached[:, :-1]; r[:, :-1] |= reached[:, 1:]
+            r[:, :, 1:] |= reached[:, :, :-1]; r[:, :, :-1] |= reached[:, :, 1:]
+            new = r & ~reached
+            d[new] = k * spacing
+            reached = r
+            if reached.all():
+                break
+        return d
+
+
+def sample_grid_axes(res, key, x, y, z, fill=0.0):
+    """Like sample_density_axes, for any element-centre grid stored in
+    res[key] (NaN replaced by `fill`, no clipping)."""
+    g = np.nan_to_num(np.asarray(res[key], dtype=np.float64), nan=fill)
+    Wx = _lin_weights(x, res["xc"])
+    Wy = _lin_weights(y, res["yc"])
+    Wz = _lin_weights(z, res["zc"])
+    a = np.tensordot(Wx, g, axes=(1, 0))
+    a = np.tensordot(a, Wy, axes=(1, 1))
+    a = np.tensordot(a, Wz, axes=(1, 1))
+    return a.astype(np.float32)
+
+
+def shape_distance(xs, spacing):
+    """Approximate signed distance [mm] (>0 inside) of the 0.5 level of
+    a smooth density field xs on a regular grid: (xs - 0.5) / |grad xs|
+    with the gradient magnitude measured on the 0.5 level."""
+    gx, gy, gz = np.gradient(xs.astype(np.float32), spacing)
+    gm = np.sqrt(gx * gx + gy * gy + gz * gz)
+    band = np.abs(xs - 0.5) < 0.1
+    g = float(np.median(gm[band])) if band.any() else 0.0
+    if g <= 1e-9:
+        g = 1.0 / max(spacing, 1e-6)
+    return ((xs - 0.5) / g).astype(np.float32)
+
+
+def local_thickness_check(sdf_centres, active, cell_size):
+    """Fraction of the part where the local half-thickness (distance
+    to the surface at the medial axis, approximated by local maxima of
+    the SDF) is below half a cell: there a complete TPMS cell does not
+    fit (Giacalone 2023: lattice stiffness drops with few cells)."""
+    s = np.where(active, sdf_centres, -1e9)
+    ridge = active.copy()
+    for ax in range(3):
+        for sh in (1, -1):
+            ridge &= s >= _shift(s, sh, ax)
+    if not ridge.any():
+        return 0.0, 0.0
+    t = 2.0 * s[ridge]
+    frac_thin = float(np.mean(t < cell_size))
+    return frac_thin, float(np.median(t))
 
 
 def _max_disp(u):
@@ -854,6 +1152,8 @@ def sample_density_axes(res, x, y, z):
 
 
 _SAVE_KEYS = ("xc", "yc", "zc", "rho", "fs_grid", "fs_yield_min",
+              "shape", "keep_P", "keep_T", "keep_ring", "mass_pred_g",
+              "volume_pred_mm3", "dens",
               "fs_ult_min", "mass_g", "material", "rho_min", "rho_max", "rho_target",
               "mean_rho", "compliance", "compliance_uniform", "gain",
               "max_disp", "iterations", "history", "filter_radius",
