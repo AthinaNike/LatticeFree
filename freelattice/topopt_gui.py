@@ -431,25 +431,22 @@ def make_preview(doc, res, label="TopOpt_density"):
 # DIALOG
 # ======================================================================
 
+def _fit_to_screen(dlg, body):
+    from .commands import fit_to_screen
+    fit_to_screen(dlg, body)
+
+
 class TopOptDialog(QtWidgets.QDialog):
 
     def __init__(self):
         super(TopOptDialog, self).__init__(Gui.getMainWindow())
         self.setWindowTitle("LatticeFree V2 — Topology optimization")
-        self.setMinimumWidth(460)
-        form = QtWidgets.QFormLayout(self)
+        self.setMinimumWidth(480)
 
-        intro = QtWidgets.QLabel(
-            "Optimal lattice density distribution (max stiffness for "
-            "the given mass). Loads and constraints come from the FEM "
-            "workbench: Fixed, Force, Pressure in the active Analysis.")
-        intro.setWordWrap(True)
-        intro.setStyleSheet("color: gray;")
-        form.addRow(intro)
-
+        # ---------------------------------------------------- essentials
+        top = QtWidgets.QFormLayout()
         self.combo_target = QtWidgets.QComboBox()
-        self.combo_target.addItem(
-            "— Demo: cantilever 120x30x40 mm (built-in load) —", None)
+        self.combo_target.addItem("— Demo cantilever (built-in load) —", None)
         doc = App.ActiveDocument
         if doc:
             sel = Gui.Selection.getSelection()
@@ -461,200 +458,205 @@ class TopOptDialog(QtWidgets.QDialog):
                     if obj.Name == sel_name:
                         self.combo_target.setCurrentIndex(
                             self.combo_target.count() - 1)
-        form.addRow("Component:", self.combo_target)
-
+        top.addRow("Component:", self.combo_target)
         self.label_cons = QtWidgets.QLabel("")
-        self.label_cons.setWordWrap(True)
-        form.addRow("", self.label_cons)
+        self.label_cons.setToolTip(
+            "Loads and constraints come from the FEM workbench: Fixed, "
+            "Force, Pressure in the active Analysis.")
+        top.addRow("", self.label_cons)
 
         self.combo_tpms = QtWidgets.QComboBox()
         for k, d in engine.TPMS.items():
             self.combo_tpms.addItem(d["label"], k)
-        form.addRow("TPMS:", self.combo_tpms)
-
         self.spin_cell = self._dspin(0.5, 500.0, 10.0, " mm")
-        form.addRow("TPMS cell size:", self.spin_cell)
-        cell_row = QtWidgets.QHBoxLayout()
-        self.btn_cell = QtWidgets.QPushButton("Fit cell to target")
+        self.btn_cell = QtWidgets.QPushButton("Fit")
         self.btn_cell.setToolTip(
-            "Smallest cell whose printable minimum density leaves room "
-            "for the optimization (min density ~55% of the mean).")
-        cell_row.addWidget(self.btn_cell)
-        cell_row.addStretch(1)
-        form.addRow("", cell_row)
+            "Fit cell to target: smallest cell whose printable minimum "
+            "density leaves room for the optimization.")
+        top.addRow("TPMS, cell:", self._row(self.combo_tpms, self.spin_cell,
+                                            self.btn_cell))
 
-        # --- Printability limits (feasibility) -----------------------
+        self.combo_mat = QtWidgets.QComboBox()
+        for k in topopt.MATERIALS:
+            self.combo_mat.addItem(k, k)
+        self.combo_mat.addItem("Custom", None)
+        top.addRow("Material:", self.combo_mat)
+
+        self.combo_obj = QtWidgets.QComboBox()
+        self.combo_obj.addItem("Max stiffness for a given mass", "stiffness")
+        self.combo_obj.addItem("Min mass for the safety factor", "strength")
+        self.combo_obj.addItem("Min mass for a required stiffness",
+                               "stiffness_target")
+        top.addRow("Objective:", self.combo_obj)
+        self.spin_target = self._dspin(5.0, 95.0, 40.0, " %", 1.0)
+        self.label_target = QtWidgets.QLabel("Mean density (mass):")
+        self.row_target = self._row(self.label_target, self.spin_target,
+                                    stretch=True)
+        top.addRow("", self.row_target)
+        self.spin_k = self._dspin(0.1, 1.0e7, 1000.0, " N/mm", 100.0, 1)
+        self.label_k = QtWidgets.QLabel("Required stiffness:")
+        self.row_k = self._row(self.label_k, self.spin_k, stretch=True)
+        top.addRow("", self.row_k)
+        self.spin_fs = self._dspin(1.0, 10.0, 2.0, "", 0.1)
+        self.spin_fs.setToolTip("Target of the 'min mass' objective and "
+                                "threshold of the strength check.")
+        top.addRow("Safety factor:", self.spin_fs)
+
+        self.check_solid = QtWidgets.QCheckBox(
+            "Solid where the density exceeds the lattice maximum")
+        self.check_solid.setToolTip(
+            "Above the lattice maximum -> SOLID; inside the range -> "
+            "gyroid at that density; below the minimum -> gyroid at the "
+            "minimum.")
+        self.check_solid.setChecked(True)
+        top.addRow(self.check_solid)
+        self.check_keep = QtWidgets.QCheckBox(
+            "Solid around load/constraint faces, ring")
+        self.check_keep.setToolTip(
+            "Bolt holes, seats, load pads stay solid (no lattice).")
+        self.check_keep.setChecked(True)
+        self.spin_ring = self._dspin(0.5, 30.0, 3.0, " mm", 0.5, 1)
+        top.addRow(self._row(self.check_keep, self.spin_ring, stretch=True))
+
+        # ---------------------------------------------------------- tabs
+        tabs = QtWidgets.QTabWidget()
+
+        # Printability
+        f1 = QtWidgets.QFormLayout()
         self.spin_lw = self._dspin(0.1, 2.0, topopt.DEFAULT_LINE_WIDTH,
                                    " mm", 0.05)
         self.spin_lines = QtWidgets.QSpinBox()
         self.spin_lines.setRange(1, 6)
         self.spin_lines.setValue(topopt.DEFAULT_MIN_LINES)
         self.spin_lines.setSuffix(" lines")
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(self.spin_lw)
-        row.addWidget(QtWidgets.QLabel("x"))
-        row.addWidget(self.spin_lines)
-        form.addRow("Min wall (line width x lines):", row)
+        f1.addRow("Min wall:", self._row(self.spin_lw, QtWidgets.QLabel("x"),
+                                         self.spin_lines))
         self.spin_pore = self._dspin(0.2, 20.0, topopt.DEFAULT_MIN_PORE,
                                      " mm", 0.1)
-        form.addRow("Minimum pore diameter:", self.spin_pore)
+        f1.addRow("Min pore:", self.spin_pore)
+        self.spin_rmax = self._dspin(10.0, 90.0, engine.RHO_MAX * 100,
+                                     " %", 1.0)
+        f1.addRow("Max lattice density:", self.spin_rmax)
         self.spin_shell = self._dspin(0.0, 20.0, 1.2, " mm", 0.2)
-        form.addRow("Outer shell thickness:", self.spin_shell)
+        f1.addRow("Outer shell:", self.spin_shell)
+        tabs.addTab(self._page(f1), "Printability")
 
-        # --- Solid where the lattice is not enough, solid zones ------
-        self.check_solid = QtWidgets.QCheckBox(
-            "Solid where the required density exceeds the lattice "
-            "maximum")
-        self.check_solid.setToolTip(
-            "The optimization may use densities from the printable "
-            "minimum up to fully solid. Then: above the lattice maximum "
-            "-> SOLID material; inside the range -> gyroid at that "
-            "density; below the minimum -> gyroid at the minimum.")
-        self.check_solid.setChecked(True)
-        form.addRow(self.check_solid)
-        self.check_keep = QtWidgets.QCheckBox(
-            "Solid, no lattice, around the FEM load/constraint faces "
-            "(bolt holes, seats)")
-        self.check_keep.setChecked(True)
-        form.addRow(self.check_keep)
-        self.spin_ring = self._dspin(0.5, 30.0, 3.0, " mm", 0.5, 1)
-        form.addRow("  Solid ring thickness:", self.spin_ring)
-
-        self.combo_obj = QtWidgets.QComboBox()
-        self.combo_obj.addItem("Max stiffness for a given mass", "stiffness")
-        self.combo_obj.addItem("Min mass for the target safety factor",
-                               "strength")
-        self.combo_obj.addItem("Min mass for a required stiffness",
-                               "stiffness_target")
-        form.addRow("Objective:", self.combo_obj)
-        self.spin_k = self._dspin(0.1, 1.0e7, 1000.0, " N/mm", 100.0, 1)
-        self.label_k = QtWidgets.QLabel("Required stiffness (at the load):")
-        form.addRow(self.label_k, self.spin_k)
-        self.spin_target = self._dspin(5.0, 70.0, 25.0, " %", 1.0)
-        self.label_target = QtWidgets.QLabel("Mean lattice density (mass):")
-        form.addRow(self.label_target, self.spin_target)
-        self.spin_rmax = self._dspin(10.0, 90.0, engine.RHO_MAX * 100, " %", 1.0)
-        form.addRow("Maximum density:", self.spin_rmax)
-        self.label_range = QtWidgets.QLabel("")
-        self.label_range.setStyleSheet("color: gray;")
-        self.label_range.setWordWrap(True)
-        form.addRow("", self.label_range)
-
-        # --- Material ----------------------------------------------
-        self.combo_mat = QtWidgets.QComboBox()
-        for k in topopt.MATERIALS:
-            self.combo_mat.addItem(k, k)
-        self.combo_mat.addItem("Custom", None)
-        form.addRow("Material:", self.combo_mat)
+        # Material data
+        f2 = QtWidgets.QFormLayout()
         self.spin_E = self._dspin(1.0, 500000.0, 3500.0, " MPa", 100.0, 0)
         self.spin_nu = self._dspin(0.0, 0.49, 0.36, "", 0.01)
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(self.spin_E)
-        row.addWidget(QtWidgets.QLabel("nu"))
-        row.addWidget(self.spin_nu)
-        form.addRow("Young modulus Es:", row)
+        f2.addRow("E, nu:", self._row(self.spin_E, self.spin_nu))
         self.spin_sy = self._dspin(0.1, 5000.0, 55.0, " MPa", 1.0, 1)
         self.spin_su = self._dspin(0.1, 5000.0, 60.0, " MPa", 1.0, 1)
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(self.spin_sy)
-        row.addWidget(QtWidgets.QLabel("ultimate"))
-        row.addWidget(self.spin_su)
-        form.addRow("Yield strength:", row)
+        f2.addRow("Yield, ultimate:", self._row(self.spin_sy, self.spin_su))
         self.spin_dens_m = self._dspin(0.1, 25.0, 1.24, " g/cm3", 0.01)
-        form.addRow("Material density:", self.spin_dens_m)
+        f2.addRow("Density:", self.spin_dens_m)
         self.spin_zf = self._dspin(0.05, 1.0, 0.5, "", 0.05)
+        self.spin_zf.setToolTip("Strength across layers / XY strength "
+                                "(FDM: 0.3-0.7).")
         self.combo_axis = QtWidgets.QComboBox()
-        for i, a in enumerate("XYZ"):
-            self.combo_axis.addItem("build axis " + a, i)
+        for i, ax in enumerate("XYZ"):
+            self.combo_axis.addItem("build " + ax, i)
         self.combo_axis.setCurrentIndex(2)
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(self.spin_zf)
-        row.addWidget(self.combo_axis)
-        form.addRow("Interlayer strength factor:", row)
-        self.label_mat = QtWidgets.QLabel(
-            "Typical values for printed parts (XY): enter your filament "
-            "datasheet. Interlayer factor = strength across layers / XY "
-            "strength (FDM: 0.3-0.7).")
-        self.label_mat.setWordWrap(True)
-        self.label_mat.setStyleSheet("color: gray;")
-        form.addRow("", self.label_mat)
+        f2.addRow("Interlayer factor:", self._row(self.spin_zf,
+                                                   self.combo_axis))
+        self.spin_C = self._dspin(0.01, 2.0, 0.414, "", 0.01, 3)
+        self.spin_n = self._dspin(0.8, 4.0, 1.386, "", 0.01, 3)
+        f2.addRow("Stiffness C, n:", self._row(self.spin_C, self.spin_n))
+        self.spin_C2 = self._dspin(0.01, 2.0, 0.30, "", 0.01, 3)
+        self.spin_m = self._dspin(0.5, 4.0, 1.5, "", 0.05, 2)
+        f2.addRow("Strength C2, m:", self._row(self.spin_C2, self.spin_m))
+        self.label_law = QtWidgets.QLabel("")
+        self.label_law.setStyleSheet("color: gray;")
+        self.label_law.setWordWrap(True)
+        f2.addRow(self.label_law)
+        self.label_mat = self.label_law      # kept for compatibility
+        tabs.addTab(self._page(f2), "Material data")
+
+        # Solver
+        f3 = QtWidgets.QFormLayout()
+        self.spin_elem = self._dspin(0.2, 100.0, 5.0, " mm", 0.5)
+        self.check_auto = QtWidgets.QCheckBox("auto")
+        self.check_auto.setChecked(True)
+        f3.addRow("FE element:", self._row(self.spin_elem, self.check_auto))
+        self.spin_filter = self._dspin(0.5, 500.0, 10.0, " mm", 1.0)
+        self.check_filter = QtWidgets.QCheckBox("= cell")
+        self.check_filter.setChecked(True)
+        f3.addRow("Filter radius:", self._row(self.spin_filter,
+                                               self.check_filter))
+        self.spin_iter = QtWidgets.QSpinBox()
+        self.spin_iter.setRange(5, 300)
+        self.spin_iter.setValue(60)
+        f3.addRow("Max iterations:", self.spin_iter)
+        self.spin_demo_force = self._dspin(1.0, 100000.0, 500.0, " N", 50.0)
+        f3.addRow("Demo load:", self.spin_demo_force)
+        tabs.addTab(self._page(f3), "Solver")
+
+        # ------------------------------------------------------ summary
+        self.label_range = QtWidgets.QLabel("")
+        self.label_range.setWordWrap(True)
+        self.label_info = QtWidgets.QLabel("")
+        self.label_info.setWordWrap(True)
+        self.label_info.setStyleSheet("color: gray;")
+
+        body = QtWidgets.QWidget()
+        bl = QtWidgets.QVBoxLayout(body)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.addLayout(top)
+        bl.addWidget(tabs)
+        bl.addWidget(self.label_range)
+        bl.addWidget(self.label_info)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setWidget(body)
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.addWidget(scroll)
+        buttons = QtWidgets.QDialogButtonBox()
+        buttons.addButton("Optimize", QtWidgets.QDialogButtonBox.AcceptRole)
+        buttons.addButton(QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._confirm)
+        buttons.rejected.connect(self.reject)
+        outer.addWidget(buttons)
+        _fit_to_screen(self, body)
+
+        # ------------------------------------------------------ signals
         self.combo_mat.currentIndexChanged.connect(self._material_changed)
         for w in (self.spin_E, self.spin_nu, self.spin_sy, self.spin_su,
                   self.spin_dens_m, self.spin_zf):
             w.valueChanged.connect(self._material_edited)
         self._loading_mat = False
         self._material_changed()
-        self.spin_C = self._dspin(0.01, 2.0, 0.414, "", 0.01, 3)
-        self.spin_n = self._dspin(0.8, 4.0, 1.386, "", 0.01, 3)
-        law_row = QtWidgets.QHBoxLayout()
-        law_row.addWidget(QtWidgets.QLabel("C"))
-        law_row.addWidget(self.spin_C)
-        law_row.addWidget(QtWidgets.QLabel("n"))
-        law_row.addWidget(self.spin_n)
-        form.addRow("Law E*/Es = C rho^n:", law_row)
-        self.label_law = QtWidgets.QLabel("")
-        self.label_law.setStyleSheet("color: gray;")
-        self.label_law.setWordWrap(True)
-        form.addRow("", self.label_law)
-        self.spin_C2 = self._dspin(0.01, 2.0, 0.30, "", 0.01, 3)
-        self.spin_m = self._dspin(0.5, 4.0, 1.5, "", 0.05, 2)
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(QtWidgets.QLabel("C2"))
-        row.addWidget(self.spin_C2)
-        row.addWidget(QtWidgets.QLabel("m"))
-        row.addWidget(self.spin_m)
-        form.addRow("Strength sigma*/sigma_s = C2 rho^m:", row)
-        self.spin_fs = self._dspin(1.0, 10.0, 2.0, "", 0.1)
-        form.addRow("Target safety factor:", self.spin_fs)
-
-        elem_row = QtWidgets.QHBoxLayout()
-        self.spin_elem = self._dspin(0.2, 100.0, 5.0, " mm", 0.5)
-        self.check_auto = QtWidgets.QCheckBox("auto")
-        self.check_auto.setChecked(True)
-        elem_row.addWidget(self.spin_elem)
-        elem_row.addWidget(self.check_auto)
-        form.addRow("FE element size:", elem_row)
-        filt_row = QtWidgets.QHBoxLayout()
-        self.spin_filter = self._dspin(0.5, 500.0, 10.0, " mm", 1.0)
-        self.check_filter = QtWidgets.QCheckBox("= cell")
-        self.check_filter.setChecked(True)
-        filt_row.addWidget(self.spin_filter)
-        filt_row.addWidget(self.check_filter)
-        form.addRow("Filter radius:", filt_row)
-        self.spin_iter = QtWidgets.QSpinBox()
-        self.spin_iter.setRange(5, 300)
-        self.spin_iter.setValue(60)
-        form.addRow("Max iterations:", self.spin_iter)
-        self.spin_demo_force = self._dspin(1.0, 100000.0, 500.0, " N", 50.0)
-        form.addRow("Demo load:", self.spin_demo_force)
-
-        self.label_info = QtWidgets.QLabel("")
-        self.label_info.setWordWrap(True)
-        form.addRow(self.label_info)
-
         for w in (self.spin_cell, self.spin_lw, self.spin_pore,
-                  self.spin_target,
-                  self.spin_rmax, self.spin_elem, self.spin_C, self.spin_n,
-                  self.spin_lines):
+                  self.spin_target, self.spin_rmax, self.spin_elem,
+                  self.spin_C, self.spin_n, self.spin_lines, self.spin_fs,
+                  self.spin_k):
             w.valueChanged.connect(self._update)
         self.btn_cell.clicked.connect(self._fit_cell)
         self.combo_obj.currentIndexChanged.connect(self._update)
-        self.spin_fs.valueChanged.connect(self._update)
-        self.spin_k.valueChanged.connect(self._update)
-        for w in (self.check_solid, self.check_keep):
-            w.toggled.connect(self._update)
-        for w in (self.check_auto, self.check_filter):
+        for w in (self.check_solid, self.check_keep, self.check_auto,
+                  self.check_filter):
             w.toggled.connect(self._update)
         self.combo_target.currentIndexChanged.connect(self._update)
         self.combo_tpms.currentIndexChanged.connect(self._tpms_changed)
         self._tpms_changed()
 
-        buttons = QtWidgets.QDialogButtonBox()
-        buttons.addButton("Optimize", QtWidgets.QDialogButtonBox.AcceptRole)
-        buttons.addButton(QtWidgets.QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self._confirm)
-        buttons.rejected.connect(self.reject)
-        form.addRow(buttons)
+    @staticmethod
+    def _row(*widgets, **kw):
+        w = QtWidgets.QWidget()
+        lay = QtWidgets.QHBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        for x in widgets:
+            lay.addWidget(x)
+        if kw.get("stretch"):
+            lay.addStretch(1)
+        return w
+
+    @staticmethod
+    def _page(form):
+        w = QtWidgets.QWidget()
+        w.setLayout(form)
+        return w
 
     @staticmethod
     def _dspin(lo, hi, val, suffix, step=1.0, dec=2):
@@ -748,51 +750,33 @@ class TopOptDialog(QtWidgets.QDialog):
         f = self.feas()
         rmin, rmax = f["rho_min"], f["rho_max"]
         lo_fit, hi_fit = law["rho_fit"]
-        txt = ("Printable density {:.0f}-{:.0f}%:  wall >= {:.2f} mm -> "
-               "min {:.0f}%  |  pores >= {:.1f} mm -> max {:.0f}% (pore "
-               "{:.1f} mm at max)  |  generator: element {:.2f} mm, "
-               "~{:.1f} M points".format(
-                   rmin * 100, rmax * 100, f["w_min"], rmin * 100,
-                   self.spin_pore.value(), rmax * 100, f["pore_at_max"],
-                   f["spacing"], f.get("points", 0) / 1e6))
+        txt = ("Printable gyroid {:.0f}-{:.0f}%  ·  wall ≥ {:.2f} mm  ·  "
+               "pores ≥ {:.1f} mm  ·  generation ~{:.1f} M points".format(
+                   rmin * 100, rmax * 100, f["w_min"],
+                   self.spin_pore.value(), f.get("points", 0) / 1e6))
         bad = (not f["ok"]) or f.get("points", 0) > topopt.MAX_GENERATOR_POINTS
         if not f["ok"]:
-            txt += "\nNOT FEASIBLE: " + f["msg"]
+            txt += "\nNOT PRINTABLE: " + f["msg"]
         elif f.get("points", 0) > topopt.MAX_GENERATOR_POINTS:
-            txt += ("\nThe lattice would need too fine a generation grid: "
-                    "increase the cell or the minimum wall.")
+            txt += ("\nWalls too thin for the generation grid: increase "
+                    "the cell or the minimum wall.")
+        obj = self.combo_obj.currentData()
         smode = self.strength_mode()
-        self.spin_target.setEnabled(not smode)
-        self.label_target.setEnabled(not smode)
-        kmode = self.combo_obj.currentData() == "stiffness_target"
-        self.spin_k.setEnabled(kmode)
-        self.label_k.setEnabled(kmode)
+        self.row_target.setVisible(obj == "stiffness")
+        self.row_k.setVisible(obj == "stiffness_target")
         self.spin_ring.setEnabled(self.check_keep.isChecked())
-        if kmode:
-            txt += ("\nObjective: the solver searches the LIGHTEST "
-                    "lattice whose stiffness under the applied load is "
-                    ">= {:.0f} N/mm (several optimizations: slower)."
-                    .format(self.spin_k.value()))
-        elif smode:
-            txt += ("\nObjective: the solver searches the LIGHTEST "
-                    "lattice whose safety factor is >= {:.1f} (several "
-                    "optimizations: slower).".format(self.spin_fs.value()))
-        if self.check_solid.isChecked():
-            txt += ("\nSolid map on: where the optimization asks for more "
-                    "than {:.0f}% the part becomes solid; elsewhere gyroid "
-                    "{:.0f}-{:.0f}%.".format(rmax * 100, rmin * 100,
-                                             rmax * 100))
         tgt_ = self.spin_target.value() / 100.0
         if f["ok"] and not smode and tgt_ - rmin < 0.03:
-            txt += ("\nMean density too close to the printable minimum: "
-                    "little room to optimize (use 'Fit cell to target').")
+            txt += ("\nMean density close to the printable minimum: "
+                    "little room to optimize (press Fit).")
             bad = True
         self.label_range.setText(txt)
         self.label_range.setStyleSheet(
             "color: #c0392b;" if bad else "color: gray;")
         self.label_law.setText(
-            "source: {}. Fitted on {:.0f}-{:.0f}%: above it the law is "
-            "extrapolated.".format(law["source"], lo_fit * 100, hi_fit * 100))
+            "Stiffness law: {}, fitted on {:.0f}-{:.0f}%. Material values "
+            "are typical for printed PLA/PETG/... (XY): use your filament "
+            "datasheet.".format(law["source"], lo_fit * 100, hi_fit * 100))
         if self.check_filter.isChecked():
             self.spin_filter.setValue(self.spin_cell.value())
         self.spin_filter.setEnabled(not self.check_filter.isChecked())
@@ -805,32 +789,32 @@ class TopOptDialog(QtWidgets.QDialog):
         nel = 1
         for a in range(3):
             nel *= max(2, int(round((bb_max[a] - bb_min[a]) / h)))
-        hints = ["Grid: ~{} elements (bounding box).".format(nel)]
+        hints = ["FE grid ~{} elements.".format(nel)]
         tgt = self.spin_target.value() / 100.0
-        if not self.strength_mode() and not rmin <= tgt <= rmax:
-            hints.append("WARNING: mean density outside the allowed range.")
+        if not smode and not self.check_solid.isChecked() and \
+                not rmin <= tgt <= rmax:
+            hints.append("Mean density outside the printable range.")
         if nel > 150000:
-            hints.append("Very heavy: increase the element size.")
+            hints.append("Very heavy: increase the FE element.")
         elif nel > 60000:
             hints.append("Heavy (several minutes).")
         if self.spin_filter.value() < 1.5 * h:
-            hints.append("Filter radius < 1.5 elements: the map may get "
-                         "checkerboard patterns.")
+            hints.append("Filter < 1.5 elements: checkerboard risk.")
         self.label_info.setText(" ".join(hints))
         # FEM constraints summary
         if self._target() is None:
-            self.label_cons.setText("Demo: clamped at X min, load on X max.")
+            self.label_cons.setText("Demo 120x30x40 mm: clamped at X min, "
+                                    "load on X max.")
             self.label_cons.setStyleSheet("color: gray;")
         elif App.ActiveDocument:
             c = collect_constraints(App.ActiveDocument)
             an = c["analysis"].Label if c["analysis"] else "no Analysis"
             ok = c["fixed"] and (c["force"] or c["pressure"])
             self.label_cons.setText(
-                "FEM ({}): {} Fixed, {} Force, {} Pressure{}".format(
+                "{}: {} Fixed, {} Force, {} Pressure{}".format(
                     an, len(c["fixed"]), len(c["force"]),
                     len(c["pressure"]),
-                    "" if ok else "  -> at least one Fixed and one load "
-                    "are needed"))
+                    "" if ok else " — need a Fixed and a load"))
             self.label_cons.setStyleSheet("" if ok else "color: #c0392b;")
 
     def _confirm(self):
@@ -854,7 +838,8 @@ class TopOptDialog(QtWidgets.QDialog):
             return
         rmin, rmax = f["rho_min"], f["rho_max"]
         tgt = self.spin_target.value() / 100.0
-        if not self.strength_mode() and not rmin <= tgt <= rmax:
+        upper = 0.95 if self.check_solid.isChecked() else rmax
+        if not self.strength_mode() and not rmin <= tgt <= upper:
             QtWidgets.QMessageBox.warning(
                 self, "LatticeFree V2",
                 "The mean density must lie within {:.0f}-{:.0f}%.".format(
@@ -1267,34 +1252,21 @@ def run(p):
     doc.recompute()
     Gui.SendMsgToActiveView("ViewFit")
 
-    if kmode and res.get("feasible") and res.get("uniform_feasible"):
-        head = ("Lightest lattice with stiffness >= {:.0f} N/mm: {:.0f} g, "
-                "{:.0f}% lighter than a uniform lattice with the same "
-                "stiffness.\n".format(
-                    p["k_target"], ver["mass_g"],
-                    100.0 * (1.0 - ver["mass_g"] / ver_u["mass_g"])))
-    elif kmode:
-        head = "Stiffness sizing done (see the report view).\n"
-    elif smode and res.get("feasible") and res.get("uniform_feasible"):
-        head = ("Lightest lattice with FS >= {:.1f}: {:.0f} g, {:.0f}% "
-                "lighter than a uniform lattice with the same FS.\n".format(
-                    p["fs_target"], ver["mass_g"],
-                    100.0 * (1.0 - ver["mass_g"] / ver_u["mass_g"])))
-    elif smode:
-        head = "Strength sizing done (see the report view).\n"
+    if sized and res.get("feasible") and res.get("uniform_feasible"):
+        head = "{:.0f} g, {:.0f}% lighter than a uniform lattice".format(
+            ver["mass_g"], 100.0 * (1.0 - ver["mass_g"] / ver_u["mass_g"]))
+    elif sized:
+        head = "{:.0f} g (target not reached: see the report)".format(
+            ver["mass_g"])
     else:
-        head = "Optimization done: +{:.0f}% stiffness at equal mass.\n".format(
-            stiff)
+        head = "{:.0f} g, stiffness {:+.0f}% vs uniform lattice".format(
+            ver["mass_g"], stiff)
     ans = QtWidgets.QMessageBox.question(
         Gui.getMainWindow(), "LatticeFree V2",
-        head +
-        "Safety factor (yield, {}): {:.2f}  [uniform lattice: {:.2f}]\n"
-        "Mass: {:.0f} g\n\n"
-        "The safety-factor map is in the 'TopOpt_safety' group "
-        "(hidden).\n\n"
-        "Open the {} generator with this density map?".format(
-            p["material"], ver["fs_yield_min"], ver_u["fs_yield_min"],
-            ver["mass_g"], engine.TPMS[p["tpms"]]["label"]),
+        "{}\nSafety factor {:.2f} (uniform {:.2f})\n\n"
+        "Generate the {} now?".format(
+            head, ver["fs_yield_min"], ver_u["fs_yield_min"],
+            engine.TPMS[p["tpms"]]["label"]),
         QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
     if ans == QtWidgets.QMessageBox.Yes:
         from . import commands

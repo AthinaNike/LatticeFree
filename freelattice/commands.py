@@ -418,6 +418,23 @@ def is_valid_solid(obj):
         return False
 
 
+def fit_to_screen(dlg, body, frac=0.85):
+    """Size a dialog to its content but never taller than the screen
+    (the content scrolls): on a laptop the long forms did not fit."""
+    try:
+        try:
+            geo = QtWidgets.QApplication.primaryScreen().availableGeometry()
+        except Exception:
+            geo = QtWidgets.QApplication.desktop().availableGeometry()
+        hmax = int(geo.height() * frac)
+        want = body.sizeHint().height() + 70
+        dlg.resize(max(dlg.minimumWidth(), body.sizeHint().width() + 40),
+                   min(want, hmax))
+        dlg.setMaximumHeight(geo.height())
+    except Exception:
+        pass
+
+
 class TPMSDialog(QtWidgets.QDialog):
     """Parameter dialog, shared by all TPMS: only the tpms_type changes
     (hence the density/wall calibration), the parameters are identical."""
@@ -428,8 +445,13 @@ class TPMSDialog(QtWidgets.QDialog):
         self.tpms_type = tpms_type
         self.label = engine.TPMS[tpms_type]["label"]
         self.setWindowTitle("LatticeFree V2 — {}".format(self.label))
-        self.setMinimumWidth(420)
-        form = QtWidgets.QFormLayout(self)
+        self.setMinimumWidth(460)
+        # essentials on top, the rest in tabs, everything scrollable
+        top = QtWidgets.QFormLayout()
+        f_grad = QtWidgets.QFormLayout()
+        f_mesh = QtWidgets.QFormLayout()
+        f_fem = QtWidgets.QFormLayout()
+        form = top
 
         self.combo_target = QtWidgets.QComboBox()
         self.combo_target.addItem("— Demo cube —", None)
@@ -476,6 +498,7 @@ class TPMSDialog(QtWidgets.QDialog):
         form.addRow("", self.label_dens)
 
         # --- Density grading (dense outside, light inside) ---
+        form = f_grad
         self.check_grad = QtWidgets.QCheckBox(
             "Grading: dense skin, light core")
         form.addRow(self.check_grad)
@@ -494,7 +517,7 @@ class TPMSDialog(QtWidgets.QDialog):
         self.spin_nozzle.setValue(0.20)
         self.spin_nozzle.setSuffix(" mm")
         self.spin_nozzle.setEnabled(False)
-        form.addRow("  Minimum wall thickness (nozzle):", self.spin_nozzle)
+        form.addRow("  Minimum wall (nozzle):", self.spin_nozzle)
 
         self.label_grad = QtWidgets.QLabel("")
         self.label_grad.setStyleSheet("color: gray;")
@@ -510,6 +533,7 @@ class TPMSDialog(QtWidgets.QDialog):
         self.check_grad.toggled.connect(_toggle_grad)
 
         # --- Density from topology optimization ---------------------
+        form = top
         self.check_topo = QtWidgets.QCheckBox(
             "Density from topology optimization (variable map)")
         form.addRow(self.check_topo)
@@ -525,8 +549,8 @@ class TPMSDialog(QtWidgets.QDialog):
         else:
             rr = res["rho"]
             self.label_topo.setText(
-                "Map: '{}', {}, cell {:.1f} mm, density {:.0f}-{:.0f}% "
-                "(mean {:.0f}%), +{:.0f}% stiffness vs uniform.".format(
+                "Map: {} · {} {:.0f} mm · {:.0f}-{:.0f}% (mean {:.0f}%) · "
+                "{:+.0f}% stiffness".format(
                     res.get("target", "?"),
                     engine.TPMS.get(res.get("tpms", ""), {}).get("label", "?"),
                     float(res.get("cell_size", 0)),
@@ -543,12 +567,13 @@ class TPMSDialog(QtWidgets.QDialog):
             self._auto_element()
         self.check_topo.toggled.connect(_toggle_topo)
 
+        form = f_mesh
         self.spin_blend = QtWidgets.QDoubleSpinBox()
         self.spin_blend.setRange(0.0, 10.0)
         self.spin_blend.setSingleStep(0.1)
         self.spin_blend.setValue(0.8)
         self.spin_blend.setSuffix(" mm")
-        form.addRow("Shell-lattice fillet radius:", self.spin_blend)
+        form.addRow("Shell-lattice fillet:", self.spin_blend)
 
         elem_row = QtWidgets.QHBoxLayout()
         self.spin_elem = QtWidgets.QDoubleSpinBox()
@@ -559,7 +584,9 @@ class TPMSDialog(QtWidgets.QDialog):
         # The V0 auto was cell/15: at low densities the wall became
         # sub-grid (the "hexagonal holes"). The auto now also tracks the
         # thinnest wall: min(cell/15, min_wall/3).
-        self.check_auto = QtWidgets.QCheckBox("auto (cell/15 and wall/3)")
+        self.check_auto = QtWidgets.QCheckBox("auto")
+        self.check_auto.setToolTip("min(cell/15, thinnest wall/3), within "
+                                   "a 25 M point budget")
         self.check_auto.setChecked(True)
         elem_row.addWidget(self.spin_elem)
         elem_row.addWidget(self.check_auto)
@@ -568,7 +595,7 @@ class TPMSDialog(QtWidgets.QDialog):
         self.spin_smooth = QtWidgets.QSpinBox()
         self.spin_smooth.setRange(0, 25)
         self.spin_smooth.setValue(8)
-        form.addRow("Taubin smoothing iterations:", self.spin_smooth)
+        form.addRow("Taubin smoothing:", self.spin_smooth)
 
         self.spin_decim = QtWidgets.QSpinBox()
         self.spin_decim.setRange(0, 90)
@@ -583,6 +610,7 @@ class TPMSDialog(QtWidgets.QDialog):
         form.addRow("Demo cube side:", self.spin_demo)
 
         # --- FEM export (mid-surface) ----------------------------------
+        form = f_fem
         self.check_fem = QtWidgets.QCheckBox(
             "Export mid-surface for FEM (shell)")
         form.addRow(self.check_fem)
@@ -619,7 +647,6 @@ class TPMSDialog(QtWidgets.QDialog):
 
         self.label_info = QtWidgets.QLabel("")
         self.label_info.setWordWrap(True)
-        form.addRow(self.label_info)
 
         self.spin_cell.valueChanged.connect(self._auto_element)
         self.check_auto.toggled.connect(self._auto_element)
@@ -654,12 +681,32 @@ class TPMSDialog(QtWidgets.QDialog):
         if preset.get("topo") and self.check_topo.isEnabled():
             self.check_topo.setChecked(True)
 
+        tabs = QtWidgets.QTabWidget()
+        for lay, name in ((f_grad, "Grading"), (f_mesh, "Mesh"),
+                          (f_fem, "FEM export")):
+            page = QtWidgets.QWidget()
+            page.setLayout(lay)
+            tabs.addTab(page, name)
+        body = QtWidgets.QWidget()
+        bl = QtWidgets.QVBoxLayout(body)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.addLayout(top)
+        bl.addWidget(tabs)
+        bl.addWidget(self.label_info)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setWidget(body)
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.addWidget(scroll)
         buttons = QtWidgets.QDialogButtonBox()
         buttons.addButton("Generate", QtWidgets.QDialogButtonBox.AcceptRole)
         buttons.addButton(QtWidgets.QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._confirm)
         buttons.rejected.connect(self.reject)
-        form.addRow(buttons)
+        outer.addWidget(buttons)
+        self._auto_element()
+        fit_to_screen(self, body)
 
     def _update_density(self, *args):
         rho = self.spin_dens.value() / 100.0
