@@ -175,13 +175,16 @@ def generate(cell_size, density, spacing, t_shell, demo_box,
     keepF = None
     if topo is not None:
         sdf_part = sdf
-        if topo.get("shape") is not None:
-            log("Stage-1 shape: trimming the part to the optimized "
-                "shape...\n")
-            xs = topopt.sample_grid_axes(topo, "shape", x, y, z, fill=0.0)
-            sdf = np.minimum(sdf, topopt.shape_distance(xs, spacing)).astype(
-                np.float32)
+        solidF = None
+        sol = topo.get("solid")
+        if sol is not None and float(np.nanmax(sol)) >= 0.5:
+            # density above the lattice maximum -> solid material
+            xs = topopt.sample_grid_axes(topo, "solid", x, y, z, fill=0.0)
+            solidF = np.minimum(topopt.shape_distance(xs, spacing),
+                                sdf).astype(np.float32)
             del xs
+            log("Solid map: regions above the lattice maximum density are "
+                "generated SOLID\n")
         ring = float(topo.get("keep_ring", 0) or 0)
         if topo.get("keep_P") is not None and ring > 0:
             kpts, _, _ = topopt.sample_triangles(topo["keep_P"],
@@ -200,6 +203,9 @@ def generate(cell_size, density, spacing, t_shell, demo_box,
             # solid within `ring` of the connection faces, inside the part
             keepF = np.minimum(ring - dist, sdf_part).astype(np.float32)
             del dist, seed, kpts
+        if solidF is not None:
+            keepF = solidF if keepF is None else np.maximum(keepF, solidF)
+            del solidF
             log("Solid zones: {:.1f} mm around the load/constraint faces "
                 "(no lattice)\n".format(ring))
         del sdf_part

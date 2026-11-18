@@ -45,23 +45,26 @@ builds the infill with a variable wall thickness following the map.
   (checkbox **Density from topology optimization**). The last map survives a
   FreeCAD restart.
 
-### Two-stage optimization and solid connections
-- **Stage 1 — outer shape** (optional): a solid/void SIMP optimization with
-  Heaviside projection finds the shape of the component inside the part and
-  removes the volume that does not carry load (you choose the volume kept, e.g.
-  40 %). Members are at least one TPMS cell wide, so the lattice always fits.
-  The generator then builds shell + graded gyroid **inside that shape**: no CAD
-  rework needed. The report shows how much stiffness the shape keeps.
+### Solid where the lattice is not enough, solid connections
+- **Solid map** (on by default): the optimization may use densities from the
+  printable minimum up to fully solid (above the lattice maximum the stiffness
+  rises linearly to the bulk material). The result is mapped to a printable
+  design: **density above the lattice maximum → solid**, inside the printable
+  range → gyroid at that density, below the minimum → gyroid at the minimum.
+  The FE model is re-solved on the mapped design, so stiffness and strength
+  check refer to what is printed. On a cantilever this finds by itself the
+  classic I-beam: solid flanges near the clamp, graded gyroid in the web.
 - **Solid zones around connections** (on by default): around every face used
   by a FEM constraint (Fixed, Force, Pressure) — bolt holes, bearing seats,
   load pads — the part stays **solid, without lattice**, for a chosen ring
-  thickness (default 3 mm). A lattice under a bolt head would crush.
+  thickness (default 3 mm, rounded to the FE grid so model and geometry
+  match). A lattice under a bolt head would crush.
 - **Cell-fit check**: warns when the local thickness of the part is below one
   cell (few cells → less stiffness than predicted).
 - **Mass check after generation**: the generated mesh volume is compared with
   the optimization prediction.
-- Method after M. Giacalone, PhD thesis, University of Modena and Reggio
-  Emilia, 2023 (two-stage TO with thin wall and graded gyroid).
+- Inspired by M. Giacalone, PhD thesis, University of Modena and Reggio
+  Emilia, 2023 (thin wall + graded gyroid, solid regions where needed).
 
 ### Three objectives
 - **Max stiffness for a given mass** — you set the mean density (the mass), the

@@ -501,19 +501,17 @@ class TopOptDialog(QtWidgets.QDialog):
         self.spin_shell = self._dspin(0.0, 20.0, 1.2, " mm", 0.2)
         form.addRow("Outer shell thickness:", self.spin_shell)
 
-        # --- Shape (stage 1) and solid zones -----------------------
-        self.check_shape = QtWidgets.QCheckBox(
-            "Stage 1: find the outer shape (remove the volume that "
-            "does not carry load)")
-        form.addRow(self.check_shape)
-        self.spin_vf = self._dspin(10.0, 90.0, 40.0, " %", 5.0, 0)
-        self.spin_vf.setToolTip(
-            "Stage 1 removes the material that carries little load and "
-            "keeps this percentage of the ORIGINAL part volume as the "
-            "outer shape. The lattice then fills that shape, so the final "
-            "mass is much lower. Lower = lighter but less stiff.")
-        form.addRow("  Material kept by stage 1 (% of the part):",
-                    self.spin_vf)
+        # --- Solid where the lattice is not enough, solid zones ------
+        self.check_solid = QtWidgets.QCheckBox(
+            "Solid where the required density exceeds the lattice "
+            "maximum")
+        self.check_solid.setToolTip(
+            "The optimization may use densities from the printable "
+            "minimum up to fully solid. Then: above the lattice maximum "
+            "-> SOLID material; inside the range -> gyroid at that "
+            "density; below the minimum -> gyroid at the minimum.")
+        self.check_solid.setChecked(True)
+        form.addRow(self.check_solid)
         self.check_keep = QtWidgets.QCheckBox(
             "Solid, no lattice, around the FEM load/constraint faces "
             "(bolt holes, seats)")
@@ -643,7 +641,7 @@ class TopOptDialog(QtWidgets.QDialog):
         self.combo_obj.currentIndexChanged.connect(self._update)
         self.spin_fs.valueChanged.connect(self._update)
         self.spin_k.valueChanged.connect(self._update)
-        for w in (self.check_shape, self.check_keep):
+        for w in (self.check_solid, self.check_keep):
             w.toggled.connect(self._update)
         for w in (self.check_auto, self.check_filter):
             w.toggled.connect(self._update)
@@ -769,7 +767,6 @@ class TopOptDialog(QtWidgets.QDialog):
         kmode = self.combo_obj.currentData() == "stiffness_target"
         self.spin_k.setEnabled(kmode)
         self.label_k.setEnabled(kmode)
-        self.spin_vf.setEnabled(self.check_shape.isChecked())
         self.spin_ring.setEnabled(self.check_keep.isChecked())
         if kmode:
             txt += ("\nObjective: the solver searches the LIGHTEST "
@@ -780,10 +777,11 @@ class TopOptDialog(QtWidgets.QDialog):
             txt += ("\nObjective: the solver searches the LIGHTEST "
                     "lattice whose safety factor is >= {:.1f} (several "
                     "optimizations: slower).".format(self.spin_fs.value()))
-        if self.check_shape.isChecked():
-            txt += ("\nStage 1 on: the outer shape keeps {:.0f}% of the "
-                    "part volume, members >= {:.0f} mm (one cell).".format(
-                        self.spin_vf.value(), self.spin_cell.value()))
+        if self.check_solid.isChecked():
+            txt += ("\nSolid map on: where the optimization asks for more "
+                    "than {:.0f}% the part becomes solid; elsewhere gyroid "
+                    "{:.0f}-{:.0f}%.".format(rmax * 100, rmin * 100,
+                                             rmax * 100))
         tgt_ = self.spin_target.value() / 100.0
         if f["ok"] and not smode and tgt_ - rmin < 0.03:
             txt += ("\nMean density too close to the printable minimum: "
@@ -893,8 +891,7 @@ class TopOptDialog(QtWidgets.QDialog):
             fs_target=self.spin_fs.value(),
             objective=self.combo_obj.currentData(),
             k_target=self.spin_k.value(),
-            shape_on=self.check_shape.isChecked(),
-            shape_vf=self.spin_vf.value() / 100.0,
+            solid_on=self.check_solid.isChecked(),
             keep_on=self.check_keep.isChecked(),
             keep_ring=self.spin_ring.value(),
             C=self.spin_C.value(), n=self.spin_n.value(),
@@ -966,9 +963,11 @@ def run(p):
     log("  Shell:          {:.2f} mm (solid, outside the design)\n".format(
         p["t_shell"]))
     log("  Filter radius:  {:.1f} mm\n".format(p["filter_radius"]))
-    if p.get("shape_on"):
-        log("  Stage 1:        outer shape, {:.0f}% of the part volume\n"
-            .format(p["shape_vf"] * 100))
+    if p.get("solid_on"):
+        log("  Solid map:      density > {:.0f}% -> solid, {:.0f}-{:.0f}% -> "
+            "gyroid, < {:.0f}% -> gyroid {:.0f}%\n".format(
+                p["rho_max"] * 100, p["rho_min"] * 100, p["rho_max"] * 100,
+                p["rho_min"] * 100, p["rho_min"] * 100))
     if p.get("keep_on"):
         log("  Solid zones:    {:.1f} mm around load/constraint faces\n"
             .format(p["keep_ring"]))
@@ -986,17 +985,6 @@ def run(p):
     def log_flush(s):
         log(s)
         QtWidgets.QApplication.processEvents()
-
-    def cb1(it, c, vol, change, beta=1.0):
-        k = int(round(np.log2(max(beta, 1.0)))) + 1
-        prog.setValue(min(it, 200))
-        prog.setLabelText(
-            "Stage 1 - shape: sharpening step {}/5, iteration {}\n"
-            "compliance {:.4g} N*mm  |  change {:.3f}\n"
-            "(compliance jumps at each step: it is expected)".format(
-                k, it, c, change))
-        QtWidgets.QApplication.processEvents()
-        return not prog.wasCanceled()
 
     part = build_part(target, p["h"], p["t_shell"], log)
     xn, yn, zn, hm, bb = part["xn"], part["yn"], part["zn"], part["hm"], \
@@ -1018,69 +1006,9 @@ def run(p):
         if keep_P is not None:
             keep_pts, _, _ = topopt.sample_triangles(keep_P, keep_T, 0.5 * hm)
 
-    # --- stage 1: outer shape ---------------------------------------
-    shape_grid = None
     domain, sdf2 = occ, sdf
-    if p.get("shape_on"):
-        prog.setMaximum(200)
-        ms = topopt.Model(xn, yn, zn, occ, np.zeros(occ.shape), p["Es"],
-                          p["nu"], 1.0, 1.0)
-        apply_loads(ms, lambda s: None)
-        keep_s = (topopt.keep_mask_from_points(ms, keep_pts, p["keep_ring"])
-                  if keep_pts is not None else None)
-        R1 = max(p["cell_size"], 2.0 * hm)
-        ratio = topopt.shape_size_check(
-            (bb.XMin, bb.YMin, bb.ZMin), (bb.XMax, bb.YMax, bb.ZMax), R1)
-        if ratio < 3.0:
-            App.Console.PrintWarning(
-                "  STAGE 1: the part is only {:.1f} members thick (member "
-                ">= {:.1f} mm = one cell): there is little room for a "
-                "truss-like shape. Use a smaller cell or skip stage 1.\n"
-                .format(ratio, R1))
-        log("Stage 1: outer shape (solid/void SIMP, volume {:.0f}%, "
-            "members >= {:.1f} mm)...\n".format(p["shape_vf"] * 100, R1))
-        xp, its1 = topopt.simp_shape(ms, p["shape_vf"], R1, keep=keep_s,
-                                     callback=cb1, log=log_flush)
-        if prog.wasCanceled():
-            prog.close()
-            App.Console.PrintWarning("LatticeFree: stopped in stage 1.\n")
-            return
-        shape_grid = topopt.grid_from_elements(ms, xp, fill=0.0)
-        domain = occ & (shape_grid >= 0.5)
-        if keep_s is not None:
-            domain |= topopt.grid_from_elements(
-                ms, keep_s.astype(float), fill=0.0) > 0.5
-        sdf2 = np.minimum(sdf, topopt.shape_distance(shape_grid, hm))
-        # stiffness kept by the (solid) shape vs the full solid part
-        try:
-            m_full = topopt.Model(xn, yn, zn, occ, np.zeros(occ.shape),
-                                  p["Es"], p["nu"], 1.0, 1.0)
-            apply_loads(m_full, lambda s: None)
-            m_shp = topopt.Model(xn, yn, zn, domain, np.zeros(occ.shape),
-                                 p["Es"], p["nu"], 1.0, 1.0)
-            apply_loads(m_shp, lambda s: None)
-            k_full = topopt.load_stiffness(m_full, m_full.solve(
-                np.full(m_full.nel, p["Es"]), tol=1e-5)[0])[0]
-            k_shp = topopt.load_stiffness(m_shp, m_shp.solve(
-                np.full(m_shp.nel, p["Es"]), tol=1e-5)[0])[0]
-            log("  Shape check (both fully solid): {:.0f}% of the volume "
-                "keeps {:.0f}% of the stiffness ({:.4g} vs {:.4g} N/mm)\n"
-                .format(100.0 * domain.sum() / occ.sum(),
-                        100.0 * k_shp / max(k_full, 1e-30), k_shp, k_full))
-            if k_shp < 0.15 * k_full:
-                App.Console.PrintWarning(
-                    "  The shape lost most of the stiffness: raise the "
-                    "shape volume or use a smaller cell.\n")
-        except Exception as e:
-            App.Console.PrintWarning("  Shape check skipped: {}\n".format(e))
-        log("Stage 1 done in {} iterations: the shape keeps {:.0f}% of the "
-            "part ({} of {} elements).\n".format(
-                its1, 100.0 * domain.sum() / occ.sum(), int(domain.sum()),
-                int(occ.sum())))
-        prog.setValue(0)
-        prog.setMaximum(nsteps)
 
-    # --- stage 2 model: lattice inside the shape ---------------------
+    # --- FE model of the part ----------------------------------------
     phi = topopt.shell_fraction(sdf2, p["t_shell"], hm)
     model = topopt.Model(xn, yn, zn, domain, phi, p["Es"], p["nu"],
                          p["C"], p["n"])
@@ -1095,7 +1023,8 @@ def run(p):
             "constraint faces (requested {:.1f} mm, rounded to the FE "
             "grid)\n".format(int(keep2.sum()), keep_eff, p["keep_ring"]))
     log("Active elements: {}, DOF: {}\n".format(model.nel, model.ndof))
-    thin, t_med = topopt.local_thickness_check(sdf2, domain, p["cell_size"])
+    thin, t_med, _t90 = topopt.local_thickness_check(sdf2, domain,
+                                                     p["cell_size"])
     if thin > 0.25:
         App.Console.PrintWarning(
             "  CELL FIT: in {:.0f}% of the part the local thickness is below "
@@ -1111,6 +1040,8 @@ def run(p):
     ftot = model.f.reshape(-1, 3).sum(axis=0)
     log("  Total resultant: ({:.1f}, {:.1f}, {:.1f}) N\n".format(*ftot))
     k0, Fres = topopt.load_stiffness(model, np.zeros(model.ndof))
+    if p.get("solid_on"):
+        model.solid_above = p["rho_max"]
 
     def cb(it, c, mr, change):
         prog.setValue(min(it, nsteps))
@@ -1151,13 +1082,19 @@ def run(p):
     finally:
         prog.close()
 
+    if p.get("solid_on"):
+        res = topopt.apply_solid_map(model, res)
+        log("Solid map: {:.1f}% of the lattice volume asked for more than "
+            "{:.0f}% density and becomes SOLID (model re-solved with the "
+            "mapped design).\n".format(100.0 * res["solid_fraction"],
+                                       p["rho_max"] * 100))
+        res["solid"] = topopt.smooth_grid(res["solid"], 0.7)
+
     res.update(tpms=p["tpms"], target=target.Name,
                cell_size=p["cell_size"], t_shell=p["t_shell"],
                nozzle=p["nozzle"], material=p["material"],
                line_width=p["line_width"], min_lines=p["min_lines"],
                min_pore=p["min_pore"])
-    if shape_grid is not None:
-        res["shape"] = np.where(occ, shape_grid, 0.0)
     if keep_P is not None:
         res.update(keep_P=keep_P, keep_T=keep_T,
                    keep_ring=keep_eff if keep_pts is not None
@@ -1203,12 +1140,19 @@ def run(p):
         "lattice)\n".format(res["max_disp"]))
     log("  Mass:           {:.1f} g  (shell + lattice, {:.0f} mm3, voxel "
         "estimate)\n".format(ver["mass_g"], ver["volume_mm3"]))
+    if not sized:
+        log("  Uniform lattice {:.0f}% for comparison: {:.1f} g{}\n".format(
+            p["rho_target"] * 100, ver_u["mass_g"],
+            "  (the solid map rounds densities above {:.0f}% up to solid, "
+            "so the optimized part is {:+.1f} g)".format(
+                p["rho_max"] * 100, ver["mass_g"] - ver_u["mass_g"])
+            if p.get("solid_on") else ""))
     if sized and res.get("feasible") and \
             res["mean_rho"] <= p["rho_min"] + 0.005:
         App.Console.PrintWarning(
             "  The target is already met at the MINIMUM printable density "
             "({:.0f}%): the lattice cannot get lighter. To save more mass "
-            "reduce the shape volume (stage 1), use a larger cell (lower "
+            "use a larger cell (lower "
             "minimum density) or a thinner shell.\n".format(
                 p["rho_min"] * 100))
     if kmode:
@@ -1216,7 +1160,7 @@ def run(p):
             App.Console.PrintWarning(
                 "  NOT ACHIEVABLE: even at the maximum density {:.0f}% the "
                 "stiffness is {:.4g} < {:.4g} N/mm. Increase the shell, the "
-                "maximum density or the shape volume.\n".format(
+                "maximum density or enable the solid map.\n".format(
                     p["rho_max"] * 100, res["k_found"], p["k_target"]))
         elif res["uniform_feasible"]:
             log("  Uniform lattice with the same stiffness: density {:.0f}%, "
@@ -1294,12 +1238,7 @@ def run(p):
     log(sep + "\n")
 
     try:
-        if shape_grid is not None:
-            g = _cube_bands(doc, res, np.where(domain, 1.0, np.nan),
-                            [(0.5, 2.0, (0.70, 0.72, 0.78),
-                              "stage-1 shape", 0.9)], "TopOpt_shape")
-            g.ViewObject.Visibility = False
-        if keep_pts is not None and model.phi_e.max() >= 1.0:
+        if model.phi_e.max() >= 1.0:
             kg = np.full(model.active.shape, np.nan)
             kg[model.active] = np.where(model.phi_e >= 1.0, 1.0, np.nan)
             _cube_bands(doc, res, kg, [(0.5, 2.0, (0.95, 0.55, 0.15),

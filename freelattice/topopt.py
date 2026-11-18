@@ -272,16 +272,31 @@ class Model(object):
         self.vol_e = self.hx * self.hy * self.hz
         self.fixed = np.zeros(self.ndof, dtype=bool)
         self.f = np.zeros(self.ndof)
+        # when set (= lattice maximum density), densities above it are
+        # allowed and mean "solid": the stiffness rises linearly from the
+        # lattice law at solid_above to the full material at rho = 1
+        self.solid_above = None
 
     # ---------------------------------------------------------- material
+    def _rel(self, rho):
+        C, n = self.C, self.n
+        if self.solid_above is None:
+            return C * rho ** n, C * n * rho ** (n - 1.0)
+        ra = self.solid_above
+        Ea = C * ra ** n
+        lo = rho <= ra
+        r = np.minimum(rho, ra)
+        t = np.clip((rho - ra) / (1.0 - ra), 0.0, 1.0)
+        E = np.where(lo, C * r ** n, Ea + (1.0 - Ea) * t)
+        dE = np.where(lo, C * n * r ** (n - 1.0), (1.0 - Ea) / (1.0 - ra))
+        return E, dE
+
     def young(self, rho):
         """Element Young modulus: solid shell fraction + lattice."""
-        return self.Es * (self.phi_e +
-                          (1.0 - self.phi_e) * self.C * rho ** self.n)
+        return self.Es * (self.phi_e + (1.0 - self.phi_e) * self._rel(rho)[0])
 
     def dyoung(self, rho):
-        return self.Es * (1.0 - self.phi_e) * self.C * self.n * \
-            rho ** (self.n - 1.0)
+        return self.Es * (1.0 - self.phi_e) * self._rel(rho)[1]
 
     # ----------------------------------------------------- point mapping
     def nearest_nodes(self, pts):
@@ -447,10 +462,11 @@ def optimize(model, rho_target, rho_min, rho_max, filter_radius,
     log = log or (lambda s: None)
     t0 = time.time()
     model.check()
-    if not (rho_min <= rho_target <= rho_max):
+    upper = 1.0 if model.solid_above is not None else rho_max
+    if not (rho_min <= rho_target <= upper):
         raise ValueError("Target density {:.1f}% outside the allowed "
                          "range {:.1f}-{:.1f}%".format(
-                             rho_target * 100, rho_min * 100, rho_max * 100))
+                             rho_target * 100, rho_min * 100, upper * 100))
     filt = DensityFilter(model, filter_radius)
     wv = (1.0 - model.phi_e) * model.vol_e
     wv_sum = max(wv.sum(), 1e-12)
@@ -484,7 +500,7 @@ def optimize(model, rho_target, rho_min, rho_max, filter_radius,
         # --- OC with bisection on the volume constraint ----------------
         l1, l2 = 0.0, 1e9
         lo = np.maximum(rho_min, x - move)
-        hi = np.minimum(rho_max, x + move)
+        hi = np.minimum(upper, x + move)
         xnew = x
         B = -dc / np.maximum(dv, 1e-30)
         for _ in range(200):
@@ -713,7 +729,7 @@ def size_for_strength(model, fs_target, sy, C2, m, rho_min, rho_max,
         return r, f
 
     lo = rho_min
-    hi = rho_max - 1e-4
+    hi = 0.95 if model.solid_above is not None else rho_max - 1e-4
     r_hi, f_hi = evaluate(hi)
     best, f_best, feasible = r_hi, f_hi, f_hi >= fs_target
     if feasible and not cancelled[0]:
@@ -817,7 +833,7 @@ def size_for_stiffness(model, k_target, rho_min, rho_max, filter_radius,
         return r, k
 
     lo = rho_min
-    hi = rho_max - 1e-4
+    hi = 0.95 if model.solid_above is not None else rho_max - 1e-4
     r_hi, k_hi = evaluate(hi)
     best, k_best, feasible = r_hi, k_hi, k_hi >= k_target
     if feasible and not cancelled[0]:
@@ -875,114 +891,58 @@ def size_for_stiffness(model, k_target, rho_min, rho_max, filter_radius,
 
 
 # ======================================================================
-# STAGE 1: OUTER SHAPE (solid/void SIMP) AND SOLID "KEEP" ZONES
+# SOLID MAP (density above the lattice maximum -> solid) AND SOLID
+# "KEEP" ZONES AROUND THE CONNECTIONS
 # ======================================================================
 
-def _heaviside(xt, beta, eta=0.5):
-    tb = np.tanh(beta * eta)
-    den = tb + np.tanh(beta * (1.0 - eta))
-    xb = (tb + np.tanh(beta * (xt - eta))) / den
-    dxb = beta * (1.0 - np.tanh(beta * (xt - eta)) ** 2) / den
-    return xb, dxb
+def apply_solid_map(model, res, cg_tol=1e-6):
+    """Turns the optimized densities into a printable design: density
+    above the lattice maximum -> SOLID material, density inside the
+    printable range -> lattice at that density (the minimum is the lower
+    bound, so lighter regions get the minimum printable lattice). The
+    model is updated (solid elements get phi = 1, the piecewise law is
+    switched off) and re-solved, so compliance, displacements and the
+    strength check refer to the real design."""
+    ra = model.solid_above
+    if ra is None:
+        return res
+    rho = np.asarray(res["rho_e"], dtype=np.float64)
+    design = model.phi_e < 0.999
+    solid = design & (rho > ra + 1e-6)
+    model.solid_above = None
+    model.phi_e = np.where(solid, 1.0, model.phi_e)
+    rho_l = np.minimum(rho, ra)
+    u, _ = model.solve(model.young(rho_l), u0=res.get("u"), tol=cg_tol)
+    c = float(model.f @ u)
+    grid = np.full(model.active.shape, np.nan)
+    grid[model.active] = rho_l
+    sg = np.zeros(model.active.shape)
+    sg[model.active] = solid.astype(np.float64)
+    res = dict(res)
+    res.update(rho_e=rho_l, u=u, compliance=c, max_disp=_max_disp(u),
+               rho=grid, solid=sg,
+               solid_fraction=float(solid.sum()) / max(design.sum(), 1),
+               gain=1.0 - c / res["compliance_uniform"]
+               if res.get("compliance_uniform") else 0.0)
+    return res
 
-
-def simp_shape(model, volfrac, filter_radius, keep=None, penal=3.0,
-               emin=1e-2, maxit=200, move=0.2, tol_change=0.01,
-               cg_tol=1e-4, beta_max=16.0, callback=None, log=None):
-    """SIMP (solid/void) on the voxel model with density filter and
-    Heaviside projection (beta continuation 1 -> beta_max): minimum
-    compliance with volume fraction volfrac of the part. Elements in
-    `keep` (bool per active element) are solid and outside the design.
-    Returns the projected physical density per element (~0/1) and the
-    number of iterations.
-
-    Stage 1 of the two-stage method (Giacalone 2023, ch. 4): it finds
-    the outer shape of the component and removes the volume that does
-    not carry load; the lattice is then graded inside that shape. The
-    projection drives the result to crisp solid/void, so that the 0.5
-    level used as outer surface does not cut grey load paths. The
-    filter radius sets the minimum member size."""
-    log = log or (lambda s: None)
-    model.check()
-    keep = np.zeros(model.nel, bool) if keep is None else np.asarray(keep)
-    design = ~keep
-    filt = DensityFilter(model, filter_radius)
-    Es = model.Es
-    beta = 1.0
-
-    def phys(xd):
-        xt = filt.forward(xd)
-        xb, dxb = _heaviside(xt, beta)
-        return np.where(keep, 1.0, xb), np.where(keep, 0.0, dxb)
-
-    x = np.where(keep, 1.0, volfrac)
-    xp, dxb = phys(x)
-    u = None
-    it = 0
-    hist = []
-    since = 0
-    for it in range(1, maxit + 1):
-        E = Es * (emin + (1.0 - emin) * xp ** penal)
-        u, its = model.solve(E, u0=u, tol=cg_tol)
-        c = float(model.f @ u)
-        dc = -penal * (1.0 - emin) * Es * xp ** (penal - 1.0) * \
-            model.element_energy(u)
-        dc = np.minimum(filt.backward(dc * dxb), -1e-30)
-        dv = np.maximum(filt.backward(dxb / float(model.nel)), 1e-30)
-        l1, l2 = 0.0, 1e15
-        lo = np.maximum(0.0, x - move)
-        hi = np.minimum(1.0, x + move)
-        B = -dc / dv
-        xnew = x
-        for _ in range(200):
-            lmid = 0.5 * (l1 + l2)
-            xnew = np.where(keep, 1.0,
-                            np.clip(x * np.sqrt(B / lmid), lo, hi))
-            if phys(xnew)[0].mean() > volfrac:
-                l1 = lmid
-            else:
-                l2 = lmid
-            if (l2 - l1) <= 1e-6 * (l1 + l2):
-                break
-        change = float(np.max(np.abs(xnew - x)[design])) if design.any() \
-            else 0.0
-        x = xnew
-        xp, dxb = phys(x)
-        grey = float(np.mean(4.0 * xp * (1.0 - xp)))
-        log("  shape it {:3d}  compliance {:.4g}  volume {:.1f}%  beta "
-            "{:.0f}  grey {:.2f}  change {:.3f}  (CG {} it.)\n".format(
-                it, c, 100 * xp.mean(), beta, grey, change, its))
-        if callback is not None and callback(it, c, float(xp.mean()),
-                                             change, beta) is False:
-            break
-        hist.append(c)
-        since += 1
-        # a step ends when the compliance has settled (< 0.5 % over the
-        # last 5 iterations) or the design no longer moves; the first
-        # step (plain SIMP, it builds the topology) gets more iterations
-        stalled = len(hist) >= 5 and (max(hist[-5:]) - min(hist[-5:])) < \
-            5e-3 * hist[-1]
-        cap = 60 if beta <= 1.0 else 25
-        if (change < tol_change or stalled or since >= cap) and since >= 5:
-            log("  -> sharpening step beta={:.0f} done: compliance {:.4g}, "
-                "grey {:.0f}%{}\n".format(
-                    beta, c, 100 * grey,
-                    "" if (change < tol_change or stalled)
-                    else " (step capped at {} iterations)".format(cap)))
-            if beta >= beta_max:
-                break
-            beta = min(2.0 * beta, beta_max)
-            xp, dxb = phys(x)
-            since = 0
-            hist = []
-    return xp, it
-
-
-def shape_size_check(bb_min, bb_max, member):
-    """The shape stage needs room for members of size `member`: returns
-    the ratio (smallest part dimension / member size)."""
-    dmin = min(bb_max[a] - bb_min[a] for a in range(3))
-    return dmin / max(member, 1e-9)
+def smooth_grid(g, sigma=1.0):
+    """Separable Gaussian smoothing (sigma in elements), numpy only."""
+    r = max(1, int(np.ceil(2.5 * sigma)))
+    k = np.exp(-0.5 * (np.arange(-r, r + 1) / sigma) ** 2)
+    k /= k.sum()
+    out = np.asarray(g, dtype=np.float64)
+    for ax in range(3):
+        pad = [(0, 0)] * 3
+        pad[ax] = (r, r)
+        a = np.pad(out, pad, mode="edge")
+        acc = np.zeros_like(out)
+        for i, w in enumerate(k):
+            sl = [slice(None)] * 3
+            sl[ax] = slice(i, i + out.shape[ax])
+            acc += w * a[tuple(sl)]
+        out = acc
+    return out
 
 
 def grid_from_elements(model, values, fill=np.nan):
@@ -1064,21 +1024,24 @@ def shape_distance(xs, spacing):
 
 
 def local_thickness_check(sdf_centres, active, cell_size):
-    """Fraction of the part where the local half-thickness (distance
-    to the surface at the medial axis, approximated by local maxima of
-    the SDF) is below half a cell: there a complete TPMS cell does not
-    fit (Giacalone 2023: lattice stiffness drops with few cells)."""
+    """Local thickness of the part from the medial ridge of the SDF
+    (local maxima). Ridge points close to edges and corners (SDF below a
+    quarter of the maximum) are ignored: there the distance to the
+    surface is small by construction. Returns (fraction of the ridge
+    thinner than one cell, median thickness, 90th percentile = thickness
+    of the bulkiest regions)."""
     s = np.where(active, sdf_centres, -1e9)
     ridge = active.copy()
     for ax in range(3):
         for sh in (1, -1):
             ridge &= s >= _shift(s, sh, ax)
+    if ridge.any():
+        ridge &= s >= 0.25 * float(s[ridge].max())
     if not ridge.any():
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
     t = 2.0 * s[ridge]
-    frac_thin = float(np.mean(t < cell_size))
-    return frac_thin, float(np.median(t))
-
+    return (float(np.mean(t < cell_size)), float(np.median(t)),
+            float(np.percentile(t, 90)))
 
 def _max_disp(u):
     if u.size == 0:
@@ -1161,7 +1124,7 @@ def sample_density_axes(res, x, y, z):
 
 
 _SAVE_KEYS = ("xc", "yc", "zc", "rho", "fs_grid", "fs_yield_min",
-              "shape", "keep_P", "keep_T", "keep_ring", "mass_pred_g",
+              "solid", "keep_P", "keep_T", "keep_ring", "mass_pred_g",
               "volume_pred_mm3", "dens",
               "fs_ult_min", "mass_g", "material", "rho_min", "rho_max", "rho_target",
               "mean_rho", "compliance", "compliance_uniform", "gain",
