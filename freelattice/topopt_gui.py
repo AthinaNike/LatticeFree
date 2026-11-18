@@ -507,7 +507,13 @@ class TopOptDialog(QtWidgets.QDialog):
             "does not carry load)")
         form.addRow(self.check_shape)
         self.spin_vf = self._dspin(10.0, 90.0, 40.0, " %", 5.0, 0)
-        form.addRow("  Shape volume (of the part):", self.spin_vf)
+        self.spin_vf.setToolTip(
+            "Stage 1 removes the material that carries little load and "
+            "keeps this percentage of the ORIGINAL part volume as the "
+            "outer shape. The lattice then fills that shape, so the final "
+            "mass is much lower. Lower = lighter but less stiff.")
+        form.addRow("  Material kept by stage 1 (% of the part):",
+                    self.spin_vf)
         self.check_keep = QtWidgets.QCheckBox(
             "Solid, no lattice, around the FEM load/constraint faces "
             "(bolt holes, seats)")
@@ -981,10 +987,14 @@ def run(p):
         log(s)
         QtWidgets.QApplication.processEvents()
 
-    def cb1(it, c, vol, change):
-        prog.setValue(min(it, 120))
-        prog.setLabelText("Stage 1 - shape: iteration {}  |  volume {:.0f}%"
-                          "  |  change {:.3f}".format(it, vol * 100, change))
+    def cb1(it, c, vol, change, beta=1.0):
+        k = int(round(np.log2(max(beta, 1.0)))) + 1
+        prog.setValue(min(it, 200))
+        prog.setLabelText(
+            "Stage 1 - shape: sharpening step {}/5, iteration {}\n"
+            "compliance {:.4g} N*mm  |  change {:.3f}\n"
+            "(compliance jumps at each step: it is expected)".format(
+                k, it, c, change))
         QtWidgets.QApplication.processEvents()
         return not prog.wasCanceled()
 
@@ -1012,7 +1022,7 @@ def run(p):
     shape_grid = None
     domain, sdf2 = occ, sdf
     if p.get("shape_on"):
-        prog.setMaximum(120)
+        prog.setMaximum(200)
         ms = topopt.Model(xn, yn, zn, occ, np.zeros(occ.shape), p["Es"],
                           p["nu"], 1.0, 1.0)
         apply_loads(ms, lambda s: None)

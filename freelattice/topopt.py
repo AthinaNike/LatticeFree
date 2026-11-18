@@ -887,7 +887,7 @@ def _heaviside(xt, beta, eta=0.5):
 
 
 def simp_shape(model, volfrac, filter_radius, keep=None, penal=3.0,
-               emin=1e-2, maxit=150, move=0.2, tol_change=0.01,
+               emin=1e-2, maxit=200, move=0.2, tol_change=0.01,
                cg_tol=1e-4, beta_max=16.0, callback=None, log=None):
     """SIMP (solid/void) on the voxel model with density filter and
     Heaviside projection (beta continuation 1 -> beta_max): minimum
@@ -953,13 +953,22 @@ def simp_shape(model, volfrac, filter_radius, keep=None, penal=3.0,
             "{:.0f}  grey {:.2f}  change {:.3f}  (CG {} it.)\n".format(
                 it, c, 100 * xp.mean(), beta, grey, change, its))
         if callback is not None and callback(it, c, float(xp.mean()),
-                                             change) is False:
+                                             change, beta) is False:
             break
         hist.append(c)
         since += 1
-        stalled = len(hist) >= 6 and (max(hist[-6:]) - min(hist[-6:])) < \
-            2e-3 * hist[-1]
-        if (change < tol_change or stalled or since >= 25) and since >= 5:
+        # a step ends when the compliance has settled (< 0.5 % over the
+        # last 5 iterations) or the design no longer moves; the first
+        # step (plain SIMP, it builds the topology) gets more iterations
+        stalled = len(hist) >= 5 and (max(hist[-5:]) - min(hist[-5:])) < \
+            5e-3 * hist[-1]
+        cap = 60 if beta <= 1.0 else 25
+        if (change < tol_change or stalled or since >= cap) and since >= 5:
+            log("  -> sharpening step beta={:.0f} done: compliance {:.4g}, "
+                "grey {:.0f}%{}\n".format(
+                    beta, c, 100 * grey,
+                    "" if (change < tol_change or stalled)
+                    else " (step capped at {} iterations)".format(cap)))
             if beta >= beta_max:
                 break
             beta = min(2.0 * beta, beta_max)
